@@ -8,6 +8,7 @@
 #include "bf_tree_cb.h"
 #include "bf_tree_vol.h"
 #include "bf_tree_cleaner.h"
+#include "page_cleaner.h"
 #include "bf_tree.h"
 
 #include "smthread.h"
@@ -195,6 +196,7 @@ bf_tree_m::bf_tree_m(const sm_options& options)
     _cleaner = new bf_tree_cleaner (this, npgwriters,
             cleaner_interval_millisec_min, cleaner_interval_millisec_max,
             cleaner_write_buffer_pages, initially_enable_cleaners);
+    _dcleaner = NULL;
 
     _dirty_page_count_approximate = 0;
     _swizzled_page_count_approximate = 0;
@@ -233,13 +235,25 @@ bf_tree_m::~bf_tree_m() {
         delete _cleaner;
         _cleaner = NULL;
     }
+    if (_dcleaner != NULL) {
+        delete _dcleaner;
+        _dcleaner = NULL;
+    }
     DO_PTHREAD(pthread_mutex_destroy(&_eviction_lock));
 
+}
+
+void bf_tree_m::set_cleaner(LogArchiver* _archiver, const sm_options& _options) {
+    _dcleaner = new page_cleaner_mgr(this, _archiver->getDirectory(), _options);
 }
 
 w_rc_t bf_tree_m::init ()
 {
     W_DO(_cleaner->start_cleaners());
+    if(_dcleaner != NULL) {
+        W_DO(_cleaner->request_stop_cleaners());
+        W_DO(_cleaner->join_cleaners());
+    }
     return RCOK;
 }
 
@@ -248,8 +262,12 @@ w_rc_t bf_tree_m::destroy ()
     if (_volume != NULL) {
         W_DO (uninstall_volume());
     }
-    W_DO(_cleaner->request_stop_cleaner());
-    W_DO(_cleaner->join_cleaner());
+
+    if(_dcleaner == NULL) {
+        W_DO(_cleaner->request_stop_cleaners());
+        W_DO(_cleaner->join_cleaners());
+    }
+
     return RCOK;
 }
 
@@ -424,12 +442,13 @@ w_rc_t bf_tree_m::install_volume(vol_t* volume) {
         return rc;
     }
     _volume = desc;
+    if(_dcleaner != NULL) W_DO(_dcleaner->install_cleaner());
     return RCOK;
 }
 
 w_rc_t bf_tree_m::_preload_root_page(bf_tree_vol_t* desc, vol_t* volume, StoreID store, PageID shpid, bf_idx idx) {
     w_assert1(shpid >= volume->first_data_pageid());
-    W_DO(volume->read_page(shpid, _buffer[idx]));
+    W_DO(volume->read_page(shpid, &_buffer[idx]));
 
     // _buffer[idx].checksum == 0 is possible when the root page has been never flushed out.
     // this method is called during volume mount (even before recover), crash tests like
@@ -507,12 +526,17 @@ w_rc_t bf_tree_m::uninstall_volume(const bool clear_cb)
     }
 
     // CS TODO: why forcing volume here??
-    // if (!desc->_volume->is_failed()) {
-    //     // do not force if ongoing restore -- writing here would cause a
-    //     // deadlock, since restore is waiting for the uninstall and we
-    //     // would be waiting for restore here.
-    //     W_DO(_cleaner->force_volume(vid));
-    // }
+    //if (!desc->_volume->is_failed()) {
+        // do not force if ongoing restore -- writing here would cause a
+        // deadlock, since restore is waiting for the uninstall and we
+        // would be waiting for restore here.
+    //    if(_dcleaner != NULL) {
+    //        W_DO(_dcleaner->force_volume(vid));
+    //    }
+    //    else {
+    //        W_DO(_cleaner->force_volume(vid));
+    //    }
+    //}
 
     // If caller is a concurrent recovery and call 'dismount_all' after
     // Log Analysys phase, do not clear the buffer pool because the remaining
@@ -544,6 +568,7 @@ w_rc_t bf_tree_m::uninstall_volume(const bool clear_cb)
     }
 
     delete _volume;
+    if(_dcleaner != NULL) W_DO(_dcleaner->uninstall_cleaner());
     _volume = NULL;
     return RCOK;
 }
@@ -759,7 +784,7 @@ w_rc_t bf_tree_m::_fix_nonswizzled(generic_page* parent, generic_page*& page,
 
             if (!virgin_page) {
                 INC_TSTAT(bf_fix_nonroot_miss_count);
-                w_rc_t read_rc = volume->_volume->read_page(shpid, *page);
+                w_rc_t read_rc = volume->_volume->read_page(shpid, page);
 
                 // Not checking 'past_end' (stSHORTIO), because if the page
                 // does not exist on disk (only if fix_direct from REDO
@@ -1193,9 +1218,15 @@ void bf_tree_m::unpin_for_refix(bf_idx idx) {
 
 ///////////////////////////////////   Dirty Page Cleaner BEGIN       ///////////////////////////////////
 w_rc_t bf_tree_m::force_volume() {
+    if(_dcleaner != NULL) {
+        return _dcleaner->force_all();
+    }
     return _cleaner->force_volume();
 }
 w_rc_t bf_tree_m::wakeup_cleaners() {
+    if(_dcleaner != NULL) {
+        return _dcleaner->wakeup_cleaners();
+    }
     return _cleaner->wakeup_cleaner();
 }
 
@@ -1666,7 +1697,7 @@ w_rc_t bf_tree_m::load_for_redo(bf_idx idx,
     w_assert1(shpid >= volume->_volume->first_data_pageid());
 
     // Load the physical page from disk
-    W_DO(volume->_volume->read_page(shpid, _buffer[idx]));
+    W_DO(volume->_volume->read_page(shpid, &_buffer[idx]));
 
     // For the loaded page, compare its checksum
     // If inconsistent, return error

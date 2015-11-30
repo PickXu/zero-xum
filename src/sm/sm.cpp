@@ -432,6 +432,11 @@ ss_m::_construct_once()
         if (archiving) {
             logArchiver = new LogArchiver(_options);
             logArchiver->fork();
+
+            bool decoupled_cleaner = _options.get_bool_option("sm_decoupled_cleaner", false);
+            if(decoupled_cleaner) {
+                bf->set_cleaner(logArchiver, _options);
+            }
         }
     } else {
         /* Run without logging at your own risk. */
@@ -461,7 +466,8 @@ ss_m::_construct_once()
     /*
      *  Level 3
      */
-    chkpt = new chkpt_m;
+    bool decoupled_chkpt = _options.get_bool_option("sm_decoupled_chkpt", false);
+    chkpt = new chkpt_m(decoupled_chkpt);
     if (! chkpt)  {
         W_FATAL(eOUTOFMEMORY);
     }
@@ -1562,7 +1568,6 @@ void ss_m::dump_page_lsn_chain(std::ostream &o, const PageID &pid, const lsn_t &
     // using static method since restart_m is not guaranteed to be active
     restart_m::dump_page_lsn_chain(o, pid, max_lsn);
 }
-
 
 rc_t ss_m::verify_volume(
     int hash_bits, verify_volume_result &result)

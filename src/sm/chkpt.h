@@ -4,20 +4,20 @@
 
 /* -*- mode:C++; c-basic-offset:4 -*-
      Shore-MT -- Multi-threaded port of the SHORE storage manager
-   
+
                        Copyright (c) 2007-2009
       Data Intensive Applications and Systems Labaratory (DIAS)
                Ecole Polytechnique Federale de Lausanne
-   
+
                          All Rights Reserved.
-   
+
    Permission to use, copy, modify and distribute this software and
    its documentation is hereby granted, provided that both the
    copyright notice and this permission notice appear in all copies of
    the software, derivative works or modified versions, and any
    portions thereof, and that both notices appear in supporting
    documentation.
-   
+
    This code is distributed in the hope that it will be useful, but
    WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. THE AUTHORS
@@ -63,19 +63,80 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 
 #include "sm_base.h"
 #include "w_heap.h"
+#include "logarchiver.h"
+
+//#include "lock.h"               // Lock re-acquisition
+//#include "btree_impl.h"         // Lock re-acquisition
+//#include "btree_logrec.h"       // Lock re-acquisition
+
+#include <vector>
+#include <list>
+#include <map>
+#include <algorithm>
+#include <limits>
+
+ typedef std::map<uint64_t, signed int> tid_CLR_map;
 
 // For checkpoint to gather lock information into heap if asked
 struct comp_lock_info_t;
 class CmpXctLockTids;
 typedef class Heap<comp_lock_info_t*, CmpXctLockTids> XctLockHeap;
 
+struct dev_tab_entry_t {
+  bool dev_mounted;
+  lsn_t dev_lsn;
+};
+
+struct bkp_tab_entry_t {
+  string bkp_path;
+};
+
+struct buf_tab_entry_t {
+  snum_t store;
+  lsn_t rec_lsn;              // initial dirty lsn
+  lsn_t page_lsn;             // last write lsn
+  bool dirty;                 //this flag is only used to filter non-dirty pages
+};
+
+struct lck_tab_entry_t {
+  okvl_mode lock_mode;
+  uint32_t lock_hash;
+};
+
+struct xct_tab_entry_t {
+  smlevel_0::xct_state_t state;
+  lsn_t last_lsn;               // most recent log record
+  lsn_t undo_nxt;               // undo next
+  lsn_t first_lsn;              // first lsn of the txn
+};
+
+typedef map<string, dev_tab_entry_t>       dev_tab_t;
+typedef map<vid_t, bkp_tab_entry_t>        bkp_tab_t;
+typedef map<lpid_t, buf_tab_entry_t>       buf_tab_t;
+typedef map<tid_t, list<lck_tab_entry_t> > lck_tab_t;
+typedef map<tid_t, xct_tab_entry_t>        xct_tab_t;
+
 struct chkpt_t{
-  chkpt_dev_tab_t dev_table;
-  chkpt_backup_tab_t backup_table;
-  chkpt_restore_tab_t restore_table[];  //one per volume
-  chkpt_bf_tab_t dp_table;
-  chkpt_xct_lock_t lock_table[];  //one per transaction
-  chkpt_xct_tab_t xct_table;
+  lsn_t begin_lsn;
+  lsn_t min_rec_lsn;
+  lsn_t min_xct_lsn;
+
+  //Volume Table
+  vid_t next_vid;
+  dev_tab_t dev_tab;
+
+  //Backup Table
+  bkp_tab_t bkp_tab;
+
+  //Dirty Page Table
+  buf_tab_t buf_tab;
+
+  //Lock Table
+  lck_tab_t lck_tab;
+
+  //Transaction Table
+  tid_t youngest;
+  xct_tab_t xct_tab;
 };
 
 
@@ -86,16 +147,16 @@ class chkpt_thread_t;
  *  class chkpt_m
  *
  *  Checkpoint Manager. User calls spawn_chkpt_thread() to fork
- *  a background thread to take checkpoint every now and then. 
+ *  a background thread to take checkpoint every now and then.
  *  User calls take() to take a checkpoint immediately.
  *
- *  User calls wakeup_and_take() to wake up the checkpoint 
+ *  User calls wakeup_and_take() to wake up the checkpoint
  *  thread to checkpoint soon.
  *
  *********************************************************************/
-class chkpt_m {
+class chkpt_m : public smlevel_0 {
 public:
-    NORET            chkpt_m();
+    NORET            chkpt_m(bool _decoupled);
     NORET            ~chkpt_m();
 
     /*
@@ -114,16 +175,32 @@ public:
     void             synch_take();
     void             synch_take(XctLockHeap& lock_heap);  // Record lock information in heap
     void             take(chkpt_mode_t chkpt_mode, XctLockHeap& lock_heap, const bool record_lock = false);
+    void             dcpld_take(chkpt_mode_t chkpt_mode);
+    void             backward_scan_log(const lsn_t master_lsn, const lsn_t begin_lsn, chkpt_t& new_chkpt, const bool restart_with_lock);
+    void             forward_scan_log(const lsn_t master_lsn, const lsn_t begin_lsn, chkpt_t& new_chkpt, const bool restart_with_lock);
 
+    bool decoupled;
 
 private:
     chkpt_thread_t*  _chkpt_thread;
     long             _chkpt_count;
-    chkpt_t*         _chkpt_current;
+    lsn_t            _chkpt_last;
+    LogArchiver::LogConsumer* cons;
+
+    bool             _analysis_system_log(logrec_t& r, chkpt_t& new_chkpt);
+    void             _analysis_ckpt_bf_log(logrec_t& r,  chkpt_t& new_chkpt);
+    void             _analysis_ckpt_xct_log(logrec_t& r, chkpt_t& new_chkpt, tid_CLR_map& mapCLR);
+    void             _analysis_ckpt_lock_log(logrec_t& r, chkpt_t& new_chkpt);
+    void             _analysis_other_log(logrec_t& r, chkpt_t& new_chkpt);
+    void             _analysis_process_lock(logrec_t& r, chkpt_t& new_chkpt, tid_CLR_map& mapCLR);
+    void             _analysis_acquire_lock_log(logrec_t& r, chkpt_t& new_chkpt);
+    void             _analysis_process_compensation_map(tid_CLR_map& mapCLR, chkpt_t& new_chkpt);
+    void             _analysis_process_txn_table(chkpt_t& new_chkpt);
+
 
 public:
     // These functions are for the use of chkpt -- to serialize
-    // logging of chkpt and prepares 
+    // logging of chkpt and prepares
 };
 
 /*<std-footer incl-file-exclusion='CHKPT_H'>  -- do not edit anything below this line -- */

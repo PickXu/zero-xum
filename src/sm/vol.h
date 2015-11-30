@@ -48,7 +48,7 @@ public:
      */
     rc_t                write_many_pages(
         PageID             first_page,
-        const generic_page* buf,
+        const generic_page* buf,        //caller must align this buffer
         int                 cnt,
         bool ignoreRestore = false);
 
@@ -56,9 +56,13 @@ public:
         return write_many_pages(page, buf, 1);
     }
 
-    rc_t                read_page(
-        PageID             page,
-        generic_page&       buf);
+    rc_t                read_page(PageID page, generic_page* const buf);
+
+    rc_t                read_many_pages(
+        PageID             first_page,
+        generic_page* const buf,        //caller must align this buffer
+        int                 cnt,
+        bool ignoreRestore = false);
 
     rc_t read_backup(PageID first, size_t count, void* buf);
     rc_t write_backup(PageID first, size_t count, void* buf);
@@ -177,7 +181,7 @@ private:
     char _logrec_buf[128];
 
     rc_t mount(const char* devname, bool truncate = false);
-    rc_t dismount(bool bf_uninstall = true, bool abrupt = false);
+    rc_t dismount(bool abrupt = false);
 
     /** Methods to create and destroy _alloc_cache and _stnode_cache */
     void clear_caches();

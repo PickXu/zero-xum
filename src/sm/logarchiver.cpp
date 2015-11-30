@@ -788,7 +788,7 @@ rc_t LogArchiver::ArchiveDirectory::closeScan(int& fd)
     return RCOK;
 }
 
-LogArchiver::LogConsumer::LogConsumer(lsn_t startLSN, size_t blockSize)
+LogArchiver::LogConsumer::LogConsumer(lsn_t startLSN, size_t blockSize, bool ignore)
     : nextLSN(startLSN), endLSN(lsn_t::null), currentBlock(NULL),
     blockSize(blockSize)
 {
@@ -801,7 +801,9 @@ LogArchiver::LogConsumer::LogConsumer(lsn_t startLSN, size_t blockSize)
     reader = new ReaderThread(readbuf, startLSN);
     logScanner = new LogScanner(blockSize);
 
-    initLogScanner(logScanner);
+    if(ignore) {
+        initLogScanner(logScanner);
+    }
     reader->fork();
 }
 
@@ -1552,6 +1554,11 @@ void LogArchiver::replacement()
 void LogArchiver::pushIntoHeap(logrec_t* lr, bool duplicate)
 {
     while (!heap->push(lr, duplicate)) {
+        if (heap->size() == 0) {
+            W_FATAL_MSG(fcINTERNAL,
+                    << "Heap empty but push not possible!");
+        }
+
         // heap full -- invoke selection and try again
         if (heap->size() == 0) {
             // CS TODO this happens sometimes for very large page_img_format
@@ -1565,7 +1572,6 @@ void LogArchiver::pushIntoHeap(logrec_t* lr, bool duplicate)
         bool success = selection();
 
         w_assert0(success || heap->size() == 0);
-
     }
 }
 
@@ -2201,6 +2207,11 @@ size_t LogArchiver::ArchiveIndex::findRun(lsn_t lsn)
      * we do a linear search instead of binary search.
      */
     w_assert1(lastFinished >= 0);
+
+    if(lsn >= runs[lastFinished].lastLSN) {
+        return lastFinished + 1;
+    }
+
     int result = lastFinished;
     while (result > 0 && runs[result].firstLSN > lsn) {
         result--;

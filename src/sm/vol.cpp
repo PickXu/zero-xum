@@ -31,8 +31,6 @@
 // Needed to get LSN of restore_begin log record
 #include "logdef_gen.cpp"
 
-
-
 vol_t::vol_t(const sm_options& options)
              : _unix_fd(-1),
                _apply_fake_disk_latency(false),
@@ -305,7 +303,7 @@ void vol_t::redo_segment_restore(unsigned segment)
     _restore_mgr->markSegmentRestored(segment, true /* redo */);
 }
 
-rc_t vol_t::dismount(bool bf_uninstall, bool abrupt)
+rc_t vol_t::dismount(bool abrupt)
 {
     spinlock_write_critical_section cs(&_mutex);
 
@@ -314,7 +312,7 @@ rc_t vol_t::dismount(bool bf_uninstall, bool abrupt)
     INC_TSTAT(vol_cache_clears);
 
     w_assert1(_unix_fd >= 0);
-    if (bf_uninstall && smlevel_0::bf) { // might have shut down already
+    if (smlevel_0::bf) { // might have shut down already
         W_DO(smlevel_0::bf->uninstall_volume(!abrupt /* clear_cb */));
     }
 
@@ -404,7 +402,7 @@ rc_t vol_t::sx_add_backup(string path, bool redo)
 void vol_t::shutdown(bool abrupt)
 {
     // bf_uninstall causes a force on the volume through the bf_cleaner
-    W_COERCE(dismount(!abrupt /* uninstall */, abrupt));
+    W_COERCE(dismount(abrupt));
 }
 
 rc_t vol_t::alloc_a_page(PageID& shpid, bool redo)
@@ -513,14 +511,45 @@ bool vol_t::set_fake_disk_latency(const int adelay)
 
 /*********************************************************************
  *
- *  vol_t::read_page(pnum, page, past_end)
+ *  vol_t::read_page(pnum, page)
  *
- *  Read the page at "pnum" of the volume into the buffer "page".
+ *  Read the page at "pnum" of the volume to the buffer "page".
  *
  *********************************************************************/
-rc_t vol_t::read_page(PageID pnum, generic_page& page)
+rc_t vol_t::read_page(PageID pnum, generic_page* const buf)
 {
-    DBG(<< "Page read " << pnum);
+    return read_many_pages(pnum, buf, 1);
+}
+
+/*********************************************************************
+ *
+ *  vol_t::read_many_pages(first_page, buf, cnt)
+ *
+ *  Read "cnt" buffers in "buf" from pages starting at "first_page"
+ *  of the volume.
+ *
+ *********************************************************************/
+rc_t vol_t::read_many_pages(shpid_t first_page, generic_page* const buf, int cnt,
+        bool ignoreRestore)
+{
+    DBG(<< "Page read: vol " << _vid << " from page " << first_page << " to " << first_page + cnt);
+
+    #ifdef ZERO_INIT
+    /*
+     * When a write into the buffer pool of potentially uninitialized
+     * memory occurs (such as padding)
+     * there is a purify/valgrind supression to keep the SM from being gigged
+     * for the SM-using application's legitimate behavior.  However, this
+     * uninitialized memory writes to a page in the buffer pool
+     * colors the corresponding bytes in the buffer pool with the
+     * "uninitialized" memory color.  When a new page is read in from
+     * disk, nothing changes the color of the page back to "initialized",
+     * and you suddenly see UMR or UMC errors from valid buffer pool pages.
+     */
+    memset(buf, '\0', cnt * sizeof(generic_page));
+    #endif
+
+
     /*
      * CS: If volume is marked as failed, we must invoke restore manager and
      * wait until the requested page is restored. If we succeed in placing a
@@ -533,36 +562,50 @@ rc_t vol_t::read_page(PageID pnum, generic_page& page)
      * volume into a new file descriptor for the replacement device. The logic
      * for restore, however, would remain the same.
      */
+
     while (is_failed()) {
-        w_assert1(_restore_mgr);
-
-        { // pin avoids restore mgr being destructed while we access it
-            spinlock_read_critical_section cs(&_mutex);
-            if (!_restore_mgr->pin()) { break; }
+        if(ignoreRestore) {
+            // volume is failed, but we don't want to restore
+            return RC(eVOLFAILED);
         }
-
-        if (!_restore_mgr->isRestored(pnum)) {
-            DBG(<< "Page read triggering restore of " << pnum);
-            bool reqSucceeded = _restore_mgr->requestRestore(pnum, &page);
-            _restore_mgr->waitUntilRestored(pnum);
-            w_assert1(_restore_mgr->isRestored(pnum));
-
-            if (reqSucceeded) {
-                // page is loaded in buffer pool already
-                w_assert1(page.pid == pnum);
-                sysevent::log_page_read(pnum);
-                return RCOK;
+        else {
+            { // pin avoids restore mgr being destructed while we access it
+                spinlock_read_critical_section cs(&_mutex);
+                if (!_restore_mgr->pin()) { break; }
             }
-        }
 
-        _restore_mgr->unpin();
-        check_restore_finished();
-        break;
+            // volume is failed, but we want restore to take place
+            int i = 0;
+            while(i < cnt) {
+                if (!_restore_mgr->isRestored(first_page + i)) {
+                    DBG(<< "Page read triggering restore of " << first_page + i);
+                    bool reqSucceeded = false;
+                    if(cnt == 1) {
+                        reqSucceeded = _restore_mgr->requestRestore(first_page + i, buf);
+                    }
+                    else {
+                        reqSucceeded = _restore_mgr->requestRestore(first_page + i, NULL);
+                    }
+                    _restore_mgr->waitUntilRestored(first_page + i);
+                    w_assert1(_restore_mgr->isRestored(first_page));
+                    if (reqSucceeded) {
+                        // page is loaded in buffer pool already
+                        w_assert1(buf->pid == lpid_t(_vid, first_page + i));
+                        sysevent::log_page_read(pnum);
+                        return RCOK;
+                    }
+                }
+                i++;
+            }
+            _restore_mgr->unpin();
+            check_restore_finished();
+            break;
+        }
     }
 
-    size_t offset = size_t(pnum) * sizeof(page);
-
-    smthread_t* t = me();
+    w_assert1(first_page > 0 && first_page < (shpid_t)(_num_pages));
+    w_assert1(cnt > 0);
+    size_t offset = size_t(first_page) * sizeof(generic_page);
 
 #ifdef ZERO_INIT
     /*
@@ -576,24 +619,29 @@ rc_t vol_t::read_page(PageID pnum, generic_page& page)
      * disk, nothing changes the color of the page back to "initialized",
      * and you suddenly see UMR or UMC errors from valid buffer pool pages.
      */
-    memset(&page, '\0', sizeof(page));
+    memset(buf, '\0', cnt * sizeof(generic_page));
 #endif
 
-    w_rc_t err = t->pread(_unix_fd, (char *) &page, sizeof(page), offset);
-    if(err.err_num() == stSHORTIO) {
+    memset(buf, '\0', cnt * sizeof(generic_page));
+    int read_count = 0;
+    W_DO(me()->pread_short(_unix_fd, (char *) &buf, cnt * sizeof(generic_page),
+                offset, read_count));
+
+    //w_rc_t err = t->pread(_unix_fd, (char *) &pages, cnt * sizeof(generic_page), offset);
+    //if(err.err_num() == stSHORTIO) {
         /*
          * If we read past the end of the file, this means it is a virgin page,
          * so we simply fill the buffer with zeroes. Note that we can't read
          * past the logical size of the device due to the assert above.
          */
-        memset(&page, 0, sizeof(page));
-    }
-    else {
-        W_DO(err);
-        w_assert1(page.pid == pnum);
-    }
+    //    memset(&page, 0, sizeof(page));
+    //}
+    //else {
+    //    w_assert1(page.pid == lpid_t(_vid, pnum));
+    //}
+    //W_DO(err);
 
-    sysevent::log_page_read(pnum);
+    sysevent::log_page_read(first_page, cnt);
 
     return RCOK;
 }
@@ -732,6 +780,7 @@ rc_t vol_t::write_backup(PageID first, size_t count, void* buf)
     return RCOK;
 }
 
+
 /*********************************************************************
  *
  *  vol_t::write_many_pages(pnum, pages, cnt)
@@ -740,7 +789,7 @@ rc_t vol_t::write_backup(PageID first, size_t count, void* buf)
  *  of the volume.
  *
  *********************************************************************/
-rc_t vol_t::write_many_pages(PageID pnum, const generic_page* const pages, int cnt,
+rc_t vol_t::write_many_pages(PageID first_page, const generic_page* const buf, int cnt,
         bool ignoreRestore)
 {
     if (_readonly) {
@@ -795,17 +844,7 @@ rc_t vol_t::write_many_pages(PageID pnum, const generic_page* const pages, int c
 
     w_assert1(pnum > 0 && pnum < (PageID) num_used_pages());
     w_assert1(cnt > 0);
-    size_t offset = size_t(pnum) * sizeof(generic_page);
-
-#if W_DEBUG_LEVEL > 2
-    for (int j = 1; j < cnt; j++) {
-        w_assert1(ignoreRestore ||
-                pages[j].pid - 1 == pages[j-1].pid);
-        // CS: this assertion should hold, but some test cases fail it
-        // e.g., TreeBufferpoolTest.Swizzle in test_bf_tree.cpp
-        // w_assert1(pages[j].tag != t_btree_p || pages[j].lsn != lsn_t::null);
-    }
-#endif
+    size_t offset = size_t(first_page) * sizeof(generic_page);
 
     smthread_t* t = me();
 
@@ -813,13 +852,13 @@ rc_t vol_t::write_many_pages(PageID pnum, const generic_page* const pages, int c
     if(_apply_fake_disk_latency) start = gethrtime();
 
     // do the actual write now
-    W_COERCE(t->pwrite(_unix_fd, pages, sizeof(generic_page)*cnt, offset));
+    W_COERCE(t->pwrite(_unix_fd, buf, sizeof(generic_page)*cnt, offset));
 
     fake_disk_latency(start);
     ADD_TSTAT(vol_blks_written, cnt);
     INC_TSTAT(vol_writes);
 
-    sysevent::log_page_write(pnum, cnt);
+    sysevent::log_page_write(first_page, cnt);
 
     return RCOK;
 }

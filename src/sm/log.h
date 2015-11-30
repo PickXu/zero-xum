@@ -250,6 +250,7 @@ public:
     virtual fileoff_t           reserve_space(fileoff_t howmuch) = 0;
     virtual void                release_space(fileoff_t howmuch) = 0;
     virtual rc_t                wait_for_space(fileoff_t &amt, int32_t timeout) = 0;
+    virtual bool                verify_chkpt_reservation() = 0;
     virtual fileoff_t           consume_chkpt_reservation(fileoff_t howmuch) = 0;
     virtual void                activate_reservations()  = 0;
 
@@ -301,6 +302,7 @@ public:
 
     /// Get the next log record for transaction, put its sequence number in argument \a lsn
     bool                         xct_next(lsn_t& lsn, logrec_t*& r);
+    bool                         xct_next(lsn_t& lsn, logrec_t& r);
 
     /// Get the return code from the last next() call.
     w_rc_t&                      get_last_rc();
