@@ -14,6 +14,7 @@
 #include "bf_hashtable.h"
 #include "bf_tree_cb.h"
 #include <iosfwd>
+#include "page_cleaner_base.h"
 
 class sm_options;
 class lsn_t;
@@ -23,7 +24,7 @@ class test_bf_tree;
 class test_bf_fixed;
 class bf_tree_cleaner;
 class bf_tree_cleaner_slave_thread_t;
-class page_cleaner_mgr;
+class page_cleaner;
 class btree_page_h;
 struct EvictionContext;
 
@@ -138,7 +139,6 @@ public:
     virtual void run();
 };
 
-
 /**
  * \Brief The new buffer manager that exploits the tree structure of indexes.
  * \ingroup SSMBUFPOOL
@@ -163,8 +163,7 @@ class bf_tree_m {
     friend class bf_tree_cleaner_slave_thread_t; // for page cleaning
     friend class bf_eviction_thread_t;
     friend class WarmupThread;
-    friend class page_cleaner_mgr;
-    friend class page_cleaner_slave;
+    friend class page_cleaner_decoupled;
 
 public:
 #ifdef PAUSE_SWIZZLING_ON
@@ -178,8 +177,6 @@ public:
 
     /** destructs the buffer pool.  */
     ~bf_tree_m ();
-
-    void set_cleaner(LogArchiver* _archiver, const sm_options& _options);
 
     /** returns the total number of blocks in this bufferpool. */
     inline bf_idx get_block_cnt() const {return _block_cnt;}
@@ -197,7 +194,7 @@ public:
     w_rc_t set_swizzling_enabled(bool enabled);
 
     /** does additional initialization that might return error codes (thus can't be done in constructor). */
-    w_rc_t init ();
+    w_rc_t init (const sm_options& options);
     /** does additional clean-up that might return error codes (thus can't be done in destructor). */
     w_rc_t destroy ();
 
@@ -654,8 +651,7 @@ private:
     // queue_based_lock_t   _eviction_mutex;
 
     /** the dirty page cleaner. */
-    bf_tree_cleaner*     _cleaner;
-    page_cleaner_mgr*    _dcleaner;
+    page_cleaner_base*   _cleaner;
 
     /**
      * Unreliable count of dirty pages in this bufferpool.
