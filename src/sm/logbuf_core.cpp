@@ -40,6 +40,7 @@
 
 #include "sdisk.h"
 
+
 const std::string logbuf_core::IMPL_NAME = "logbuf";
 
 /*********************************************************************
@@ -64,11 +65,20 @@ logbuf_core::logbuf_core(const sm_options& options)
 //                 uint32_t part_size, // IN: usable partition size
 //                 int active_slot_count // IN: slot number in ConsolidationArray
 //) 
-    : log_common(options),
+    : 
+    log_common(options),
+    _context(1),
+    _publisher(_context, ZMQ_PUB),
     _to_archive_seg(NULL),
     _to_insert_seg(NULL),
     _to_flush_seg(NULL)
 {
+
+    //xum
+    _publisher.bind("tcp://*:5556");
+    _publisher.bind("ipc://replication.ipc");
+
+
     FUNC(logbuf_core::logbuf_core);
 
     std::string logdir = options.get_string_option("sm_logdir", "");
@@ -1743,6 +1753,41 @@ void logbuf_core::_flushX(lsn_t start_lsn, uint64_t start, uint64_t end) {
     // finally flush all iovs
     p->flush(p->fhdl_app(), start_lsn, written, write_size, iov, seg_cnt);
     p->set_size(start_lsn.lo() + written);
+
+    /* xum
+     * replicate the flushed segments of log records to subscribers
+     */
+    char boz[log_storage::BLOCK_SIZE];
+    memset(boz, 0, log_storage::BLOCK_SIZE);
+
+    {
+	// prepare a skip record
+        skip_log* s = _storage->get_skip_log();
+        s->set_lsn_ck(start_lsn+written);
+	long total = write_size + s->length();
+	//
+	long grand_total = log_storage::ceil2(total, log_storage::BLOCK_SIZE);
+	// take it up to multiple of block size
+	w_assert2(grand_total % log_storage::BLOCK_SIZE == 0);
+	
+        // new iovec: skip record + zeros
+        iov[seg_cnt] = iovec_t(s, s->length());
+
+#ifndef LOG_DIRECT_IO
+	iov[seg_cnt+1] = iovec_t(boz, grand_total-total);		
+#endif
+
+#ifdef LOG_DIRECT_IO
+	zmq::message_t message((seg_cnt+1)*sizeof(iovec_t));
+        memcpy(message.data(),iov,(seg_cnt+1)*sizeof(iovec_t));
+        _publisher.send(message);
+#else
+	zmq::message_t message((seg_cnt+2)*sizeof(iovec_t));
+        memcpy(message.data(),iov,(seg_cnt+2)*sizeof(iovec_t));
+        _publisher.send(message);
+#endif
+
+    }
 
     // update _to_flush_seg
     // _to_flush_seg always points to the last flushed seg

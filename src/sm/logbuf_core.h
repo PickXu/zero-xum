@@ -22,6 +22,8 @@
 
 #include "log_core.h"
 
+#include <zmq.hpp>
+
 class sm_options;
 class logrec_t;
 class partition_t;
@@ -85,6 +87,9 @@ protected:
     virtual bool _update_epochs(CArraySlot* info);
 
 private:
+    //xum
+    zmq::context_t	_context;
+    zmq::socket_t	_publisher;
     logbuf_seg *_lookup_for_compensate(lsn_t lsn);
 
     // for fetch

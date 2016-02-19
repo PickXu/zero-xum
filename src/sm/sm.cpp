@@ -1633,6 +1633,7 @@ ss_m::mount_vol(const char* path, vid_t& vid)
     spinlock_write_critical_section cs(&_begin_xct_mutex);
 
     DBG(<<"mount_vol " << path);
+    cout<<path<<endl;
 
     W_DO(vol->sx_mount(path));
     vid = vol->get(path)->vid();
