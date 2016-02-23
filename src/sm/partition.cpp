@@ -546,6 +546,7 @@ partition_t::flush(
             iovec_t(block_of_zeros(),         grand_total-total),
         };
 
+	//cout << "[PARTITION] Flush " << sizeof(iov) << " bytes" << endl;
         w_rc_t e = me()->writev(fd, iov, sizeof(iov)/sizeof(iovec_t));
         if (e.is_error()) {
             smlevel_0::errlog->clog << fatal_prio

@@ -444,6 +444,7 @@ ss_m::_construct_once()
     /*
      *  Level 1
      */
+    cout << "LOG IMPL" << logimpl << endl;
     smlevel_0::logging_enabled = _options.get_bool_option("sm_logging", true);
     if (logging_enabled)
     {

@@ -82,6 +82,9 @@ class plog_xct_t;
 #include "log_storage.h"
 #include "log_resv.h"
 
+//xum
+#include <zmq.hpp>
+
 class log_common : public log_m
 {
 public:
@@ -189,6 +192,10 @@ public:
 
 protected:
     virtual lsn_t           flush_daemon_work(lsn_t old_mark) = 0;
+
+    //xum
+    zmq::context_t    _context;
+    zmq::socket_t     _publisher;
 
     log_storage*    _storage;
     log_resv*       _resv;

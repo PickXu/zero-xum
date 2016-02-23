@@ -75,6 +75,7 @@ logbuf_core::logbuf_core(const sm_options& options)
 {
 
     //xum
+    cout << "HERE" << endl;
     _publisher.bind("tcp://*:5556");
     _publisher.bind("ipc://replication.ipc");
 

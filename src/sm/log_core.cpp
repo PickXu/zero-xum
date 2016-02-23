@@ -63,9 +63,10 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 
 #include "sm_options.h"
 #include "sm_base.h"
+#include "logdef_gen.cpp"
 #include "logtype_gen.h"
-#include "log.h"
 #include "logrec.h"
+#include "log.h"
 #include "log_core.h"
 #include "log_carray.h"
 
@@ -93,6 +94,8 @@ public:
 
 log_common::log_common(const sm_options& options)
     :
+      _context(1),
+      _publisher(_context,ZMQ_PUB),
       _log_corruption(false),
       _readbuf(NULL),
 #ifdef LOG_DIRECT_IO
@@ -483,6 +486,11 @@ void log_core::shutdown()
 log_core::log_core(const sm_options& options)
       : log_common(options)
 {
+    
+    cout << "[LOG_CORE] HERE" << endl;
+    _publisher.bind("tcp://*:5556");
+    _publisher.bind("ipc://replication.ipc");
+
     FUNC(log_core::log_core);
 
 #ifdef LOG_DIRECT_IO
@@ -499,6 +507,8 @@ log_core::log_core(const sm_options& options)
     }
     const char* path = logdir.c_str();
     bool reformat = options.get_bool_option("sm_reformat_log", false);
+
+    cout << "[LOG_CORE::LOG_CORE] STORAGE PATH: " << path << endl;
 
     _storage = new log_storage(path, reformat, _curr_lsn, _durable_lsn,
             _flush_lsn, _segsize);
@@ -1242,7 +1252,50 @@ lsn_t log_core::flush_daemon_work(lsn_t old_mark)
     );
 
     long written = (end2 - start2) + (end1 - start1);
+    //cout << "Flushed " << written << " bytes" << endl;
     p->set_size(start_lsn.lo()+written);
+
+    //xum: replicate the flushed log records to subscribers
+    {
+	    long size = (end2 - start2) + (end1 - start1);
+	    long write_size = size;
+
+	    long file_offset = log_storage::floor2(start_lsn.lo(), log_storage::BLOCK_SIZE);
+            // offset is rounded down to a block_size
+	    long delta = start_lsn.lo() - file_offset;
+	    // adjust down to the nearest full block
+	    w_assert1(start1 >= delta); // really offset - delta >= 0, 
+	    // but works for unsigned...
+	    write_size += delta; // account for the extra (clean) bytes
+	    start1 -= delta;
+
+	    // Copy a skip record to the end of the buffer.
+	    skip_log* s = _storage->get_skip_log();
+	    s->set_lsn_ck(start_lsn+size);
+            long total = write_size + s->length();
+            long grand_total = log_storage::ceil2(total, log_storage::BLOCK_SIZE);
+            w_assert2(grand_total % log_storage::BLOCK_SIZE == 0);
+
+            typedef sdisk_base_t::iovec_t iovec_t;
+	    char boz[log_storage::BLOCK_SIZE];
+	    memset(boz,0,log_storage::BLOCK_SIZE);
+
+            iovec_t iov[] = {
+		    // iovec_t expects void* not const void *
+                    iovec_t((char*)_buf+start1,                end1-start1),
+                    // iovec_t expects void* not const void *
+                    iovec_t((char*)_buf+start2,                end2-start2),
+                    iovec_t(s,                        s->length()),
+                    iovec_t((char*)boz,         grand_total-total),
+            };
+	    for (int i=0;i<4;i++) {
+		    //cout << "[LOG_CORE] Publish " << iov[i].io_len << " bytes" << endl;
+	    	    zmq::message_t message(iov[i].iov_len);
+		    memcpy(message.data(),iov[i].iov_base,iov[i].iov_len);
+		    _publisher.send(message);
+	    }
+
+    }
 
 #if W_DEBUG_LEVEL > 2
     _sanity_check();
