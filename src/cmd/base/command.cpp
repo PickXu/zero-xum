@@ -22,6 +22,7 @@
 #include "dbinspect.h"
 #include "loganalysis.h"
 #include "experiments/restore_cmd.h"
+#include "replica.h"
 
 /*
  * Adapted from
@@ -61,6 +62,8 @@ void Command::init()
     REGISTER_COMMAND("loganalysis", LogAnalysis);
     REGISTER_COMMAND("kits", KitsCommand);
     REGISTER_COMMAND("restore", RestoreCmd);
+    //xum
+    REGISTER_COMMAND("replica", Replica);
 }
 
 void Command::setupCommonOptions()
@@ -287,7 +290,10 @@ void Command::setupSMOptions()
     ("sm_bufferpool_replacement_policy", po::value<string>(),
         "Replacement Policy")
     ("sm_archdir", po::value<string>(),
-        "Path to archive directory");
+        "Path to archive directory")
+    //xum
+    ("sm_logport", po::value<string>()->default_value("5556"),
+        "Port of publisher for log replication");
     options.add(smoptions);
 }
 

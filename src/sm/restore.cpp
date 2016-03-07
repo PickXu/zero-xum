@@ -667,6 +667,7 @@ void RestoreMgr::restoreLoop()
         LogArchiver::ArchiveScanner::RunMerger* merger =
             logScan.open(startPID, endPID, backupLSN, actualSegmentSize);
 
+        ERROUT(<< "Log archiver HEHE!!!");
         DBG3(<< "RunMerger opened with " << merger->heapSize() << " runs"
                 << " starting on LSN " << backupLSN);
 
@@ -848,6 +849,7 @@ void RestoreMgr::run()
     while(!takeBackup && !volume->is_failed()) {
         usleep(1000); // 1 ms
     }
+
 
     // restoreMetadata();
     metadataRestored = true;
