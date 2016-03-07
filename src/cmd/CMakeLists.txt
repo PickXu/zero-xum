@@ -3,6 +3,7 @@ INCLUDE_DIRECTORIES (
   ${CMAKE_SOURCE_DIR}/src/cmd/restore
   ${CMAKE_SOURCE_DIR}/src/cmd/kits
   ${CMAKE_SOURCE_DIR}/src/cmd/loginspect
+  ${CMAKE_SOURCE_DIR}/src/cmd/replica
   ${CMAKE_SOURCE_DIR}/config
   ${CMAKE_SOURCE_DIR}/src/sm
   ${CMAKE_SOURCE_DIR}/src/common
@@ -19,6 +20,7 @@ add_subdirectory(base)
 add_subdirectory(restore)
 add_subdirectory(kits)
 add_subdirectory(loginspect)
+add_subdirectory(replica)
 
 add_executable(zapps main.cpp)
 
@@ -28,11 +30,16 @@ set(zapps_LIBS
     kits
     restore
     loginspect
+    replica
     # Zero/Shore libraries
     sm
     common
     # third-party dependencies
     pthread
+    boost_program_options
+    boost_system
+    boost_filesystem
+    zmq
 )
 
 target_link_libraries(zapps ${zapps_LIBS})

@@ -855,6 +855,7 @@ int ShoreEnv::start_sm()
         StoreID cat_stid;
         W_COERCE(_pssm->begin_xct());
         W_COERCE(_pssm->create_index(cat_stid));
+	cout << "CatalogID=" << cat_stid << endl;
         w_assert0(cat_stid == 1);
         W_COERCE(_pssm->commit_xct());
 

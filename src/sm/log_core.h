@@ -81,6 +81,8 @@ class fetch_buffer_loader_t;
 #include "tatas.h"
 #include "log_storage.h"
 
+#include <zmq.hpp>
+
 class log_common : public log_m
 {
 public:
@@ -152,6 +154,10 @@ public:
 
 protected:
     virtual lsn_t           flush_daemon_work(lsn_t old_mark) = 0;
+
+    //xum
+    zmq::context_t    _context;
+    zmq::socket_t     _publisher;
 
     log_storage*    _storage;
     PoorMansOldestLsnTracker* _oldest_lsn_tracker;

@@ -579,6 +579,7 @@ void RestoreMgr::restoreLoop()
         LogArchiver::ArchiveScanner::RunMerger* merger =
             logScan.open(startPID, endPID, backupLSN, actualSegmentSize);
 
+        ERROUT(<< "Log archiver HEHE!!!");
         DBG3(<< "RunMerger opened with " << merger->heapSize() << " runs"
                 << " starting on LSN " << backupLSN);
 
@@ -745,6 +746,14 @@ void RestoreMgr::run()
         usleep(1000); // 1 ms
     }
 
+//<<<<<<< HEAD
+//=======
+
+    // restoreMetadata();
+    //metadataRestored = true;
+    //numRestoredPages = firstDataPid;
+
+//>>>>>>> restart
     // if doing offline or single-pass restore, prefetch all segments
     if (!scheduler->isOnDemand() || !instantRestore) {
         unsigned last = getSegmentForPid(lastUsedPid);

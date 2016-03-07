@@ -356,6 +356,8 @@ protected:
     // CS: parameters removed from envVar/shore.conf/SHORE_*_OPTIONS
     bool _clobber;
     string _device;
+    //xum
+    string _log_port;
 
     // Status variables
     bool            _initialized;
@@ -547,6 +549,7 @@ public:
 
     // kits logging
     // void log_insert(kits_logger_t::logrec_kind_t);
+    void set_logport(string port) { _log_port = port; }
 
     // Set physical design characteristics
     uint32_t get_pd() const;

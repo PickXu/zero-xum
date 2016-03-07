@@ -266,6 +266,16 @@ ss_m::_construct_once()
      */
 #ifndef USE_ATOMIC_COMMIT // otherwise, log and clog will point to the same log object
     log = new log_core(_options);
+    //std::string logimpl = _options.get_string_option("sm_log_impl", log_core::IMPL_NAME);
+    //if (logimpl == logbuf_core::IMPL_NAME) {
+    //    log = new logbuf_core(_options);
+    //}
+    //else { // traditional
+    //    log = new log_core(_options);
+    //}
+
+    //cout << "LOG IMPL: " << logimpl << endl;
+//>>>>>>> restart
     ERROUT(<< "[" << timer.time_ms() << "] Initializing log manager (part 2)");
     W_COERCE(log->init());
 #else

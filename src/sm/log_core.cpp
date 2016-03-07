@@ -64,6 +64,7 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 #include "sm_options.h"
 #include "sm_base.h"
 #include "logtype_gen.h"
+#include "logdef_gen.cpp"
 #include "log.h"
 #include "logrec.h"
 #include "log_core.h"
@@ -162,6 +163,8 @@ public:
 
 log_common::log_common(const sm_options& options)
     :
+      _context(1),
+      _publisher(_context,ZMQ_PUB),
       _log_corruption(false),
       _readbuf(NULL),
       _start(0),
@@ -485,6 +488,7 @@ void log_core::shutdown()
     _flush_daemon_running = false;
     delete _flush_daemon;
     _flush_daemon=NULL;
+
 }
 
 /*********************************************************************
@@ -499,9 +503,23 @@ void log_core::shutdown()
 log_core::log_core(const sm_options& options)
       : log_common(options)
 {
+//<<<<<<< HEAD
+//=======
+//    FUNC(log_core::log_core);
+
+    string log_port = options.get_string_option("sm_logport","5556");
+    cout << "LOG PORT: " << log_port << endl;
+    _publisher.bind("tcp://*:"+log_port);
+    _publisher.bind("ipc://replication.ipc");
+
+//#ifdef LOG_DIRECT_IO
+//    posix_memalign((void**)&_buf, LOG_DIO_ALIGN, _segsize);
+//#else
+//>>>>>>> restart
     _buf = new char[_segsize];
 
     std::string logdir = options.get_string_option("sm_logdir", "");
+    cout << "[LOG CORE] LOG DIR: " << logdir << endl;
     if (logdir.empty()) {
         cerr << "ERROR: sm_logdir must be set to enable logging." << endl;
         W_FATAL(eCRASH);
@@ -538,7 +556,9 @@ log_core::log_core(const sm_options& options)
     _ticker = NULL;
     if (options.get_bool_option("sm_ticker_enable", false)) {
         bool msec = options.get_bool_option("sm_ticker_msec", false);
+	cout << "HERE!!!!" << endl;
         _ticker = new ticker_thread_t(msec);
+	cout << "HERE????" << endl;
     }
 
     // Load fetch buffers
@@ -1288,6 +1308,55 @@ lsn_t log_core::flush_daemon_work(lsn_t old_mark)
     long written = (end2 - start2) + (end1 - start1);
     p->set_size(start_lsn.lo()+written);
 
+//<<<<<<< HEAD
+//=======
+    //xum: replicate the flushed log records to subscribers
+    {
+	    long size = (end2 - start2) + (end1 - start1);
+	    long write_size = size;
+
+	    long file_offset = log_storage::floor2(start_lsn.lo(), log_storage::BLOCK_SIZE);
+            // offset is rounded down to a block_size
+	    long delta = start_lsn.lo() - file_offset;
+	    // adjust down to the nearest full block
+	    w_assert1(start1 >= delta); // really offset - delta >= 0, 
+	    // but works for unsigned...
+	    write_size += delta; // account for the extra (clean) bytes
+	    start1 -= delta;
+
+	    // Copy a skip record to the end of the buffer.
+	    skip_log* s = _storage->get_skip_log();
+	    s->set_lsn_ck(start_lsn+size);
+            long total = write_size + s->length();
+            long grand_total = log_storage::ceil2(total, log_storage::BLOCK_SIZE);
+            w_assert2(grand_total % log_storage::BLOCK_SIZE == 0);
+
+            typedef sdisk_base_t::iovec_t iovec_t;
+	    char boz[log_storage::BLOCK_SIZE];
+	    memset(boz,0,log_storage::BLOCK_SIZE);
+
+            iovec_t iov[] = {
+		    // iovec_t expects void* not const void *
+                    iovec_t((char*)_buf+start1,                end1-start1),
+                    // iovec_t expects void* not const void *
+                    iovec_t((char*)_buf+start2,                end2-start2),
+                    iovec_t(s,                        s->length()),
+                    iovec_t((char*)boz,         grand_total-total),
+            };
+	    for (int i=0;i<4;i++) {
+		    //cout << "[LOG_CORE] Publish " << iov[i].io_len << " bytes" << endl;
+	    	    zmq::message_t message(iov[i].iov_len);
+		    memcpy(message.data(),iov[i].iov_base,iov[i].iov_len);
+		    _publisher.send(message);
+	    }
+
+    }
+
+//#if W_DEBUG_LEVEL > 2
+//    _sanity_check();
+//#endif
+
+//>>>>>>> restart
     _durable_lsn = end_lsn;
     _start = new_start;
 

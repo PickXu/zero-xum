@@ -341,7 +341,12 @@ LogArchiver::LogArchiver(const sm_options& options)
     flushReqLSN(lsn_t::null)
 {
     std::string archdir = options.get_string_option("sm_archdir", "");
+//<<<<<<< HEAD
     size_t workspaceSize =  options.get_int_option("sm_archiver_workspace_size", DFT_WSPACE_SIZE);
+//=======
+   // size_t workspaceSize = 
+   //     options.get_int_option("sm_archiver_workspace_size", DFT_WSPACE_SIZE);
+//>>>>>>> restart
     size_t blockSize =
         options.get_int_option("sm_archiver_block_size", DFT_BLOCK_SIZE);
     size_t bucketSize =
