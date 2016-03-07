@@ -317,6 +317,7 @@ ss_m::_construct_once()
         log = new log_core(_options);
     }
 
+    cout << "LOG IMPL: " << logimpl << endl;
     ERROUT(<< "[" << timer.time_ms() << "] Initializing log manager (part 2)");
     W_COERCE(log->init());
 #else
