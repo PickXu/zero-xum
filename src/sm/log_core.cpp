@@ -524,7 +524,12 @@ log_core::fetch(lsn_t& ll, logrec_t*& rp, lsn_t* nxt, const bool forward)
     // set nxt pointer accordingly
     if (nxt) {
         if (!forward && prev_lsn == lsn_t::null) {
-            W_DO(_storage->last_lsn_in_partition(ll.hi() - 1, *nxt));
+            if (ll == lsn_t(1,0)) {
+                *nxt = lsn_t::null;
+            }
+            else {
+                W_DO(_storage->last_lsn_in_partition(ll.hi() - 1, *nxt));
+            }
         }
         else {
             if (forward) {
@@ -608,7 +613,7 @@ log_core::log_core(const sm_options& options)
         W_FATAL(eCRASH);
     }
     const char* path = logdir.c_str();
-    bool reformat = options.get_bool_option("sm_reformat_log", false);
+    bool reformat = options.get_bool_option("sm_format", false);
 
     _storage = new log_storage(path, reformat, _curr_lsn, _durable_lsn,
             _flush_lsn, _segsize);
