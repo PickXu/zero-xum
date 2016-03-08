@@ -548,11 +548,12 @@ void RestoreMgr::restoreLoop()
 
     while (numRestoredPages < lastUsedPid) {
         PageID requested = scheduler->next();
-        if (requested == PageID(0)) {
+        //if (requested == PageID(0)) {
             // no page available for now
-            usleep(2000); // 2 ms
-            continue;
-        }
+       //     usleep(2000); // 2 ms
+       //     continue;
+        //}
+        ERROUT(<< "Log archiver HEHE!!!");
 
         timer.reset();
 
@@ -579,7 +580,6 @@ void RestoreMgr::restoreLoop()
         LogArchiver::ArchiveScanner::RunMerger* merger =
             logScan.open(startPID, endPID, backupLSN, actualSegmentSize);
 
-        ERROUT(<< "Log archiver HEHE!!!");
         DBG3(<< "RunMerger opened with " << merger->heapSize() << " runs"
                 << " starting on LSN " << backupLSN);
 
