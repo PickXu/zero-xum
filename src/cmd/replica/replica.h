@@ -27,6 +27,7 @@ protected:
 	void ensureParentPathExists(string);
 	void ensureEmptyPath(string);
 	void archiveLog();
+	void copyDevice();
 private:
 	string p_logdir;	// Primary log directory
 	ShoreEnv* p_shoreEnv;	// Primary shore environment

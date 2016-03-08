@@ -82,8 +82,6 @@ void Replica::setupOptions()
 	    "Primary DB file")
 	("s_db_file", po::value<string>(&s_dbfile)->default_value("sdb"),
 	    "Secondary DB file")
-	("archdir,a", po::value<string>(&archdir)->required(),
-	    "Directory where the archive runs will be stored (must exist)")
     ;
     setupSMOptions();
 }
@@ -190,7 +188,7 @@ void Replica::initSecondary()
     s_shoreEnv->set_logport("5557");
 
     s_shoreEnv->init();
-    s_shoreEnv->set_clobber(true);
+    s_shoreEnv->set_clobber(false);
     ensureParentPathExists(s_dbfile);
     s_shoreEnv->set_device(s_dbfile);
 
@@ -303,6 +301,32 @@ void Replica::archiveLog()
     smlevel_0::logArchiver->join();
 }
 
+void Replica::copyDevice()
+{
+    std::ifstream source;
+    std::ofstream target;
+
+    std::ifstream slog;
+    std::ofstream tlog;
+
+    source.open(opt_dbfile,std::ios::binary);
+    target.open(s_dbfile,std::ios::binary);
+
+    target << source.rdbuf();
+
+    slog.open("log/log.1",std::ios::binary);
+    tlog.open("log_replica/log.1",std::ios::binary|std::ios::trunc);
+
+    tlog << slog.rdbuf();
+
+    source.close();
+    target.close();
+
+    slog.close();
+    tlog.close();
+        
+}
+
 void Replica::run()
 {
     string host("localhost");
@@ -317,7 +341,6 @@ void Replica::run()
     // Manually set some parameters
     optionValues.insert(std::make_pair("threads", po::variable_value(4,false)));
     // Init the primary and publisher
-    /*
     initPrimary();
 
     // Load the shore environment
@@ -333,13 +356,9 @@ void Replica::run()
     // when publisher is down
     //sub->join();
 
-    // Clean the shore.conf file
-    fs::path fspath(SHORE_CONF_FILE);
-    if(fs::exists(SHORE_CONF_FILE)) {
-	    fs::remove(fspath);
-    }
+    // Copy Device File to Replica
+    copyDevice();
 
-    */
     
     // Start the storage manager to initialize the 
     // the replica to the updated status
@@ -348,6 +367,7 @@ void Replica::run()
     runBenchmark(false);
 
     finishSecondary();
+
     sub->stop();
     sub->join();
 }

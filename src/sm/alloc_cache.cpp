@@ -14,7 +14,7 @@
 const size_t alloc_cache_t::extent_size = alloc_page::bits_held;
 
 alloc_cache_t::alloc_cache_t(stnode_cache_t& stcache, bool virgin)
-    : stcache(stcache), last_alloc_page(0)
+    :  last_alloc_page(0), stcache(stcache)
 {
     vector<StoreID> stores;
     stcache.get_used_stores(stores);
@@ -138,7 +138,7 @@ rc_t alloc_cache_t::sx_allocate_page(PageID& pid, bool redo)
     }
     else {
         pid = last_alloc_page + 1;
-        w_assert1(pid != stnode_page::stpid);
+        //w_assert1(pid != stnode_page::stpid);
 
         if (pid % extent_size == 0) {
             extent_id_t ext = last_alloc_page / extent_size + 1;

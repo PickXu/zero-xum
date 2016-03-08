@@ -13,7 +13,8 @@ void sysevent::log(logrec_t::kind_t kind)
     lr->header._type = kind;
     lr->header._cat = 0 | logrec_t::t_status;
     lr->fill(0, 0);
-    W_COERCE(smlevel_0::log->insert(*lr, NULL));
+    if (smlevel_0::log)
+    	W_COERCE(smlevel_0::log->insert(*lr, NULL));
     delete lr;
 }
 
