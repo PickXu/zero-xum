@@ -29,6 +29,7 @@ protected:
 	void archiveLog();
 	void copyDevice();
 private:
+	bool isPrimary;
 	string p_logdir;	// Primary log directory
 	ShoreEnv* p_shoreEnv;	// Primary shore environment
 	string opt_dbfile;

@@ -1433,15 +1433,15 @@ lsn_t log_core::flush_daemon_work(lsn_t old_mark)
 	    long file_offset = log_storage::floor2(start_lsn.lo(), log_storage::BLOCK_SIZE);
             // offset is rounded down to a block_size
 	    long delta = start_lsn.lo() - file_offset;
-	    // adjust down to the nearest full block
-	    w_assert1(start1 >= delta); // really offset - delta >= 0, 
-	    // but works for unsigned...
-	    write_size += delta; // account for the extra (clean) bytes
-	    start1 -= delta;
+
+	    w_assert1(start1 >= delta);
+	    write_size += delta;
+	    start1 -= delta; 
 
 	    // Copy a skip record to the end of the buffer.
 	    skip_log* s = _storage->get_skip_log();
 	    s->set_lsn_ck(start_lsn+size);
+
             long total = write_size + s->length();
             long grand_total = log_storage::ceil2(total, log_storage::BLOCK_SIZE);
             w_assert2(grand_total % log_storage::BLOCK_SIZE == 0);
@@ -1449,6 +1449,11 @@ lsn_t log_core::flush_daemon_work(lsn_t old_mark)
             typedef sdisk_base_t::iovec_t iovec_t;
 	    char boz[log_storage::BLOCK_SIZE];
 	    memset(boz,0,log_storage::BLOCK_SIZE);
+
+	    // TODO: The replication is append-only, in which case some padding bytes
+	    // cannot get overwritten as in log flush to device (partition.cpp:540)
+	    // IDEA: Implement a RPC on top of ZeroMQ so that the log flush logic can 
+	    // be replicated at secondary replica
 
             iovec_t iov[] = {
 		    // iovec_t expects void* not const void *
@@ -1458,12 +1463,32 @@ lsn_t log_core::flush_daemon_work(lsn_t old_mark)
                     iovec_t(s,                        s->length()),
                     iovec_t((char*)boz,         grand_total-total),
             };
+
+	    char * msg = new char[end1-start1+end2-start2+s->length()+grand_total-total]();
+	    assert(msg != NULL);
+	    int pos = 0;
+
 	    for (int i=0;i<4;i++) {
 		    //cout << "[LOG_CORE] Publish " << iov[i].io_len << " bytes" << endl;
-	    	    zmq::message_t message(iov[i].iov_len);
-		    memcpy(message.data(),iov[i].iov_base,iov[i].iov_len);
-		    _publisher.send(message);
+	    	    //zmq::message_t message(iov[i].iov_len);
+		    //memcpy(message.data(),iov[i].iov_base,iov[i].iov_len);
+		    //_publisher.send(message);
+		    memcpy(msg+pos,iov[i].iov_base,iov[i].iov_len);
+		    pos+=iov[i].iov_len;
 	    }
+	    // Generate a log_replication message
+	    replication::Replication rep;
+	    rep.set_fileoffset(file_offset);
+	    rep.set_data_size(end1-start1+end2-start2+s->length()+grand_total-total);
+	    rep.set_log_data(msg,pos);
+	
+	    // Serialize and Send out the message
+	    zmq::message_t message(rep.ByteSize());
+	    rep.SerializeToArray(message.data(),rep.ByteSize());
+	    _publisher.send(message);
+
+
+	    delete [] msg;
 
     }
 

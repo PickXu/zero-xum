@@ -13,6 +13,8 @@ namespace fs = boost::filesystem;
 #include <fstream>
 #include <iostream>
 
+#include "protobuf/log_replication.pb.h"
+
 #define Client tpcc::baseline_tpcc_client_t
 #define Environment tpcc::ShoreTPCCEnv
 #define EnvironmentPtr dynamic_cast<tpcc::ShoreTPCCEnv*>
@@ -44,14 +46,23 @@ public:
 	    std::cout << "Enter subscriber ... " << std::endl;
 
 	    //NB: the log file name is hard code temporarily
-	    myfile.open (logdir+"/log.1",std::ofstream::binary | std::ofstream::app);
+	    myfile.open (logdir+"/log.1",std::ofstream::binary);
 
 	    while(active) {
 	            zmq::message_t logrec;
 
 	            _subscriber.recv(&logrec);
 
-	            myfile.write((const char*)logrec.data(),logrec.size());
+		    replication::Replication rep;
+		    rep.ParseFromArray(logrec.data(),logrec.size());
+		    assert(rep.ByteSize() == logrec.size());
+
+		    int file_offset = rep.fileoffset();
+		    int data_size = rep.data_size();
+		    const string& data = rep.log_data();
+
+		    myfile.seekp(file_offset);
+	            myfile.write(data.c_str(),data_size);
             }
 	    myfile.close();
     }
@@ -82,6 +93,8 @@ void Replica::setupOptions()
 	    "Primary DB file")
 	("s_db_file", po::value<string>(&s_dbfile)->default_value("sdb"),
 	    "Secondary DB file")
+	("isPrimary", po::value<bool>(&isPrimary)->required(),
+	    "Indicate that whether it's a primary or secondary replica")
     ;
     setupSMOptions();
 }
@@ -306,40 +319,70 @@ void Replica::copyDevice()
     std::ifstream source;
     std::ofstream target;
 
-    std::ifstream slog;
-    std::ofstream tlog;
+    //std::ifstream slog;
+    //std::ofstream tlog;
 
     source.open(opt_dbfile,std::ios::binary);
     target.open(s_dbfile,std::ios::binary);
 
     target << source.rdbuf();
 
-    slog.open("log/log.1",std::ios::binary);
-    tlog.open("log_replica/log.1",std::ios::binary|std::ios::trunc);
+    //slog.open("log/log.1",std::ios::binary);
+    //tlog.open("log_replica/log.1",std::ios::binary|std::ios::trunc);
 
-    tlog << slog.rdbuf();
+    //tlog << slog.rdbuf();
 
     source.close();
     target.close();
 
-    slog.close();
-    tlog.close();
+    //slog.close();
+    //tlog.close();
         
 }
 
+int getPrimary()
+{
+    int pid = -1;
+
+    // Open the /proc directory
+    DIR *dp = opendir("/proc");
+    if (dp != NULL)
+    {
+        // Enumerate all entries in directory until process found
+        struct dirent *dirp;
+        while (pid < 0 && (dirp = readdir(dp)))
+        {
+            // Skip non-numeric entries
+            int id = atoi(dirp->d_name);
+            if (id > 0)
+            {
+                // Read contents of virtual /proc/{pid}/cmdline file
+                string cmdPath = string("/proc/") + dirp->d_name + "/cmdline";
+                ifstream cmdFile(cmdPath.c_str());
+                string cmdLine;
+                getline(cmdFile, cmdLine);
+                if (!cmdLine.empty())
+                {
+                    // Compare against requested process name
+                    if (cmdLine.find("isPrimary") != string::npos && cmdLine.find("true") != string::npos)
+                        pid = id;
+                }
+            }
+        }
+    }
+
+    closedir(dp);
+
+    return pid;
+}
+	
+
 void Replica::run()
 {
-    string host("localhost");
-    string port("5556");
-
-    // Start the subscriber to receive log records
-    // from the primary
-    Subscriber* sub = new Subscriber(s_logdir,host,port);
-    sub->fork();
-   
-
     // Manually set some parameters
     optionValues.insert(std::make_pair("threads", po::variable_value(4,false)));
+
+    if (isPrimary) {
     // Init the primary and publisher
     initPrimary();
 
@@ -352,13 +395,27 @@ void Replica::run()
 
     finishPrimary();
    
-    // Maybe it's necessary to add protocol to terminate the subscribers
-    // when publisher is down
-    //sub->join();
+    } else {
+    string host("localhost");
+    string port("5556");
+
+    // Start the subscriber to receive log records
+    // from the primary
+    Subscriber* sub = new Subscriber(s_logdir,host,port);
+    sub->fork();
+
+    ::sleep(2);
+
+    // Wait till the primary finish its job
+    while(getPrimary() > 0){
+	cout << "waiting for primary to finish ..." << endl;
+	::sleep(1);
+    }
+
+    sub->stop();
 
     // Copy Device File to Replica
     copyDevice();
-
     
     // Start the storage manager to initialize the 
     // the replica to the updated status
@@ -367,7 +424,7 @@ void Replica::run()
     runBenchmark(false);
 
     finishSecondary();
-
-    sub->stop();
     sub->join();
+
+    }
 }

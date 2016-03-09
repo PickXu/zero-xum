@@ -42,4 +42,4 @@ set(zapps_LIBS
     zmq
 )
 
-target_link_libraries(zapps ${zapps_LIBS})
+target_link_libraries(zapps ${zapps_LIBS} common)

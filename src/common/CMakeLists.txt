@@ -30,10 +30,11 @@ set(common_SRCS
   ${CMAKE_CURRENT_SOURCE_DIR}/lsn.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/tid_t.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/vec_mkchunk.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/vec_t.cpp)
+  ${CMAKE_CURRENT_SOURCE_DIR}/vec_t.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/protobuf/log_replication.pb.cc)
 
 add_library(common STATIC ${common_SRCS})
-target_link_libraries (common pthread rt)
+target_link_libraries (common pthread rt protobuf)
 
 # generate stat header files with tools/stats.pl
 # again, this has to be a part of source tree.

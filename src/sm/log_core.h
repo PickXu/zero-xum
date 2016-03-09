@@ -84,6 +84,7 @@ class fetch_buffer_loader_t;
 #include "log_storage.h"
 
 #include <zmq.hpp>
+#include "protobuf/log_replication.pb.h"
 
 class log_common : public log_m
 {
