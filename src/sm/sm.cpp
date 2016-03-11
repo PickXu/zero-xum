@@ -355,6 +355,7 @@ ss_m::_construct_once()
     // recovery based on SPR so that it is done explicitly by restart_m below.
     vol = new vol_t(_options,
             instantRestart ? chkpt_info : NULL);
+    cout << "Instant Restart?" << (instantRestart?"Yes":"No") << endl;
     if (instantRestart) {
         vol->build_caches(format);
     }

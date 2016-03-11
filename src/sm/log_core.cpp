@@ -1425,6 +1425,7 @@ lsn_t log_core::flush_daemon_work(lsn_t old_mark)
     long written = (end2 - start2) + (end1 - start1);
     p->set_size(start_lsn.lo()+written);
 
+#ifdef LOG_REPLICATION
     //xum: replicate the flushed log records to subscribers
     {
 	    long size = (end2 - start2) + (end1 - start1);
@@ -1491,6 +1492,7 @@ lsn_t log_core::flush_daemon_work(lsn_t old_mark)
 	    delete [] msg;
 
     }
+#endif
 
 #if W_DEBUG_LEVEL > 2
     _sanity_check();

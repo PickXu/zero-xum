@@ -29,6 +29,8 @@ protected:
 	void archiveLog();
 	void copyDevice();
 private:
+	int duration;
+	int crashDelay;
 	bool isPrimary;
 	string p_logdir;	// Primary log directory
 	ShoreEnv* p_shoreEnv;	// Primary shore environment

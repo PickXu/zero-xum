@@ -43,6 +43,7 @@ vol_t::vol_t(const sm_options& options, chkpt_t* chkpt_info)
                _log_page_reads(false), _log_page_writes(false)
 {
     string dbfile = options.get_string_option("sm_dbfile", "db");
+    cout << "[VOL] sm_dbfile: "<< dbfile << endl;
     bool truncate = options.get_bool_option("sm_format", false);
     _readonly = options.get_bool_option("sm_vol_readonly", false);
     _log_page_reads = options.get_bool_option("sm_vol_log_reads", false);

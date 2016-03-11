@@ -18,8 +18,33 @@ namespace fs = boost::filesystem;
 #define Client tpcc::baseline_tpcc_client_t
 #define Environment tpcc::ShoreTPCCEnv
 #define EnvironmentPtr dynamic_cast<tpcc::ShoreTPCCEnv*>
+//#define HAVE_CPUMON
 
-int opt_queried_sf = 1;
+int opt_queried_sf = 4;
+
+//procmonitor_t* _g_mon = ;
+class CrashThread : public smthread_t
+{
+public:
+    CrashThread(unsigned delay)
+        : smthread_t(t_regular, "CrashThread"),
+        delay(delay)
+    {
+    }
+
+    virtual ~CrashThread() {}
+
+    virtual void run()
+    {
+        ::sleep(delay);
+        cerr << "Crash thread will now abort program" << endl;
+        abort();
+    }
+
+private:
+    unsigned delay;
+};
+
 
 class Subscriber : public smthread_t
 {
@@ -38,7 +63,7 @@ public:
     {
 	    zmq::context_t _context (1);
 	    zmq::socket_t _subscriber (_context, ZMQ_SUB);
-	    std::ofstream myfile;
+	    std::fstream myfile;
 
 	    _subscriber.connect("tcp://"+host+":"+port);
 	    _subscriber.setsockopt(ZMQ_SUBSCRIBE, "",0);
@@ -46,7 +71,10 @@ public:
 	    std::cout << "Enter subscriber ... " << std::endl;
 
 	    //NB: the log file name is hard code temporarily
-	    myfile.open (logdir+"/log.1",std::ofstream::binary);
+            myfile.open (logdir+"/log.1",std::ios::in | std::ios::out);
+	    if (!myfile.is_open()){
+		myfile.open(logdir+"/log.1",std::ios::in | std::ios::out | std::ios::trunc);
+	    }
 
 	    while(active) {
 	            zmq::message_t logrec;
@@ -95,6 +123,10 @@ void Replica::setupOptions()
 	    "Secondary DB file")
 	("isPrimary", po::value<bool>(&isPrimary)->required(),
 	    "Indicate that whether it's a primary or secondary replica")
+	("duration", po::value<int>(&duration)->required(),
+	    "The duration of the benchmark")
+	("crashDelay", po::value<int>(&crashDelay),
+	    "The time elapsed before crash")
     ;
     setupSMOptions();
 }
@@ -119,6 +151,7 @@ void Replica::loadOptions(sm_options& options, bool isPrimary)
     if (isPrimary) {
     	options.set_string_option("sm_logdir", p_logdir);
 	options.set_string_option("sm_logport","5556");
+	options.set_bool_option("sm_format",true);
 	mkdirs(p_logdir);
     } else {
     	options.set_string_option("sm_dbfile", s_dbfile);
@@ -130,7 +163,7 @@ void Replica::loadOptions(sm_options& options, bool isPrimary)
 
     // ticker always turned on
     options.set_bool_option("sm_ticker_enable", true);
-    //options.set_bool_option("sm_truncate_log", opt_truncateLog);
+    options.set_bool_option("sm_truncate_log", false);
 }
 
 
@@ -268,7 +301,7 @@ void Replica::doWork(bool isPrimary)
 {
 	forkClients(isPrimary);
 
-	int remaining = 30;	// Run 30 seconds
+	int remaining = duration;
         while (remaining > 0) {
             remaining = ::sleep(remaining);
         }
@@ -276,6 +309,10 @@ void Replica::doWork(bool isPrimary)
 
 void Replica::runBenchmark(bool isPrimary)
 {
+#ifdef HAVE_CPUMON
+	_g_mon->cntr_reset();
+#endif
+
 	if (isPrimary) {
 		p_shoreEnv->reset_stats();
 		stopwatch_t timer;
@@ -284,8 +321,14 @@ void Replica::runBenchmark(bool isPrimary)
 		doWork(isPrimary);
 		joinClients(isPrimary);
 		double delay = timer.time();
-		unsigned long miochs = 0;
-                double usage = 0;
+#ifdef HAVE_CPUMON
+    _g_mon->cntr_pause();
+    unsigned long miochs = _g_mon->iochars()/MILLION;
+    double usage = _g_mon->get_avg_usage(true);
+#else
+    unsigned long miochs = 0;
+    double usage = 0;
+#endif
 		TRACE(TRACE_ALWAYS, "[Primary] end measurement\n");
 		p_shoreEnv->print_throughput(opt_queried_sf, true, 4, delay, miochs, usage);
 	} else {
@@ -296,8 +339,14 @@ void Replica::runBenchmark(bool isPrimary)
 		doWork(isPrimary);
 		joinClients(isPrimary);
 		double delay = timer.time();
-		unsigned long miochs = 0;
-                double usage = 0;
+#ifdef HAVE_CPUMON
+    _g_mon->cntr_pause();
+    unsigned long miochs = _g_mon->iochars()/MILLION;
+    double usage = _g_mon->get_avg_usage(true);
+#else
+    unsigned long miochs = 0;
+    double usage = 0;
+#endif
 		TRACE(TRACE_ALWAYS, "[Secondary] end measurement\n");
 		s_shoreEnv->print_throughput(opt_queried_sf, true, 4, delay, miochs, usage);
 	}
@@ -390,6 +439,10 @@ void Replica::run()
     p_shoreEnv->load();
     cout << "Loading finished!" << endl;
 
+    // Trigger crash after 20 seconds
+    CrashThread* t = new CrashThread(crashDelay);
+    t->fork();
+
     // Run the tpc-c benchmark
     runBenchmark(true);
 
@@ -415,7 +468,10 @@ void Replica::run()
     sub->stop();
 
     // Copy Device File to Replica
+    stopwatch_t timer;
     copyDevice();
+    double delay = timer.time();
+    cout << "Copy DB Latency: " << delay << endl;
     
     // Start the storage manager to initialize the 
     // the replica to the updated status
