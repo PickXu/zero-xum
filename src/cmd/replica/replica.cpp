@@ -103,9 +103,10 @@ public:
 	    std::cout << "Enter subscriber ... " << std::endl;
 
 	    //NB: the log file name is hard code temporarily
-            myfile.open (logdir+"/log.1",std::ios::in | std::ios::out);
+	    int curr_file = 1;
+            myfile.open (logdir+"/log."+std::to_string(curr_file),std::ios::in | std::ios::out);
 	    if (!myfile.is_open()){
-		myfile.open(logdir+"/log.1",std::ios::in | std::ios::out | std::ios::trunc);
+		myfile.open(logdir+"/log."+std::to_string(curr_file),std::ios::in | std::ios::out | std::ios::trunc);
 	    }
 
 	    while(active) {
@@ -117,9 +118,19 @@ public:
 		    rep.ParseFromArray(logrec.data(),logrec.size());
 		    assert(rep.ByteSize() == logrec.size());
 
+		    int fileID = rep.fileID();
 		    int file_offset = rep.fileoffset();
 		    int data_size = rep.data_size();
 		    const string& data = rep.log_data();
+
+		    if (fileID != curr_file) {
+			curr_file = fileID;
+			myfile.close();
+			myfile.open (logdir+"/log."+std::to_string(curr_file),std::ios::in | std::ios::out);
+		        if (!myfile.is_open()){
+                	    myfile.open(logdir+"/log."+std::to_string(curr_file),std::ios::in | std::ios::out | std::ios::trunc);
+            		}
+		    }
 
 		    myfile.seekp(file_offset);
 	            myfile.write(data.c_str(),data_size);
@@ -198,6 +209,7 @@ void Replica::loadOptions(sm_options& options, bool isPrimary)
 	options.set_string_option("sm_logdir", s_logdir);
 	options.set_string_option("sm_logport", "5557");
 	options.set_bool_option("sm_restart_instant", true);
+        options.set_bool_option("sm_archiving", true);
 	options.set_bool_option("sm_restore_instant", true);
 	options.set_bool_option("sm_restore_sched_singlepass", true);
 	options.set_bool_option("sm_restore_sched_ondemand", true);
