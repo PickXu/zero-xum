@@ -45,6 +45,38 @@ private:
     unsigned delay;
 };
 
+class MigrateThread : public smthread_t
+{
+public:
+	MigrateThread(string archdir, string bwlimit, int interval)
+			: smthread_t(t_regular, "MigrateThread"),
+			archdir(archdir),
+			bwlimit(bwlimit),
+			interval(interval),
+			active(true)
+	{
+	}
+	
+        virtual ~MigrateThread() {}
+
+        virtual void run()
+	{
+		while(active) {
+			system(("rsync -avz --bwlimit="+bwlimit+" "+archdir+" xum@128.135.11.38:~/DB/zero-xum/build/src/cmd/archive").c_str());
+			::sleep(interval);
+		}
+	}
+
+	virtual void stop()
+	{
+		active = false;
+	}
+private:
+	string archdir;
+	string bwlimit;
+	int interval;	
+	bool active;
+};
 
 class Subscriber : public smthread_t
 {
@@ -127,6 +159,8 @@ void Replica::setupOptions()
 	    "The duration of the benchmark")
 	("crashDelay", po::value<int>(&crashDelay),
 	    "The time elapsed before crash")
+	("archdir,a", po::value<string>(&archdir)->default_value("archive"),
+	    "Directory in which to store the log archive")
     ;
     setupSMOptions();
 }
@@ -153,6 +187,11 @@ void Replica::loadOptions(sm_options& options, bool isPrimary)
 	options.set_string_option("sm_logport","5556");
 	options.set_bool_option("sm_format",true);
 	mkdirs(p_logdir);
+	if (!archdir.empty()) {
+		options.set_string_option("sm_archdir", archdir);
+	        options.set_bool_option("sm_archiver_eager", true);
+        	mkdirs(archdir);
+    	}
     } else {
     	options.set_string_option("sm_dbfile", s_dbfile);
 	options.set_string_option("sm_logdir", s_logdir);
@@ -429,6 +468,12 @@ void Replica::run()
     optionValues.insert(std::make_pair("threads", po::variable_value(4,false)));
 
     if (isPrimary) {
+    zmq::context_t _context (1);
+    zmq::socket_t _ps (_context, ZMQ_PUB);
+
+    _ps.bind("tcp://*:6667");
+    _ps.bind("ipc://repl-control.ipc");
+
     // Init the primary and publisher
     initPrimary();
 
@@ -437,13 +482,23 @@ void Replica::run()
     cout << "Loading finished!" << endl;
 
     // Trigger crash after 20 seconds
-    CrashThread* t = new CrashThread(crashDelay);
-    t->fork();
+    //CrashThread* t = new CrashThread(crashDelay);
+    //t->fork();
+
+    // Start the log achive migration thread if archive is set
+    if (!archdir.empty()){
+	    MigrateThread* mt = new MigrateThread(archdir, "5000", 5);
+	    mt->fork();
+    }
 
     // Run the tpc-c benchmark
     runBenchmark(true);
 
     finishPrimary();
+
+    string msg_content("CTRL-MSG: FIN");
+    zmq::message_t ctrl_msg((void*)msg_content.data(),13, NULL);
+    _ps.send(ctrl_msg);
    
     } else {
     string host("128.135.11.115");
