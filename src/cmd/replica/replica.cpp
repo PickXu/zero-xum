@@ -45,6 +45,38 @@ private:
     unsigned delay;
 };
 
+class MigrateThread : public smthread_t
+{
+public:
+	MigrateThread(string archdir, string bwlimit, int interval)
+			: smthread_t(t_regular, "MigrateThread"),
+			archdir(archdir),
+			bwlimit(bwlimit),
+			interval(interval),
+			active(true)
+	{
+	}
+	
+        virtual ~MigrateThread() {}
+
+        virtual void run()
+	{
+		while(active) {
+			system(("rsync -avz --bwlimit="+bwlimit+" "+archdir+" xum@128.135.11.38:~/DB/zero-xum/build/src/cmd/archive").c_str());
+			::sleep(interval);
+		}
+	}
+
+	virtual void stop()
+	{
+		active = false;
+	}
+private:
+	string archdir;
+	string bwlimit;
+	int interval;	
+	bool active;
+};
 
 class Subscriber : public smthread_t
 {
@@ -454,6 +486,12 @@ void Replica::run()
     // Trigger crash after 20 seconds
     //CrashThread* t = new CrashThread(crashDelay);
     //t->fork();
+
+    // Start the log achive migration thread if archive is set
+    if (!archdir.empty()){
+	    MigrateThread* mt = new MigrateThread(archdir, "5000", 5);
+	    mt->fork();
+    }
 
     // Run the tpc-c benchmark
     runBenchmark(true);
