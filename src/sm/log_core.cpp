@@ -596,7 +596,7 @@ log_core::log_core(const sm_options& options)
 
     string log_port = options.get_string_option("sm_logport","5556");
     cout << "LOG PORT: " << log_port << endl;
-    _publisher.bind("tcp://*:"+log_port);
+    _publisher.bind(("tcp://*:"+log_port).c_str());
     _publisher.bind("ipc://replication.ipc");
 
 #ifdef LOG_DIRECT_IO
