@@ -34,7 +34,8 @@ void protobuf_AssignDesc_log_5freplication_2eproto() {
       "log_replication.proto");
   GOOGLE_CHECK(file != NULL);
   Replication_descriptor_ = file->message_type(0);
-  static const int Replication_offsets_[3] = {
+  static const int Replication_offsets_[4] = {
+    GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(Replication, fileid_),
     GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(Replication, fileoffset_),
     GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(Replication, data_size_),
     GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(Replication, log_data_),
@@ -80,9 +81,10 @@ void protobuf_AddDesc_log_5freplication_2eproto() {
   GOOGLE_PROTOBUF_VERIFY_VERSION;
 
   ::google::protobuf::DescriptorPool::InternalAddGeneratedFile(
-    "\n\025log_replication.proto\022\013replication\"F\n\013"
-    "Replication\022\022\n\nfileoffset\030\001 \002(\003\022\021\n\tdata_"
-    "size\030\002 \002(\003\022\020\n\010log_data\030\003 \002(\014", 108);
+    "\n\025log_replication.proto\022\013replication\"V\n\013"
+    "Replication\022\016\n\006fileID\030\001 \002(\005\022\022\n\nfileoffse"
+    "t\030\002 \002(\003\022\021\n\tdata_size\030\003 \002(\003\022\020\n\010log_data\030\004"
+    " \002(\014", 124);
   ::google::protobuf::MessageFactory::InternalRegisterGeneratedFile(
     "log_replication.proto", &protobuf_RegisterTypes);
   Replication::default_instance_ = new Replication();
@@ -100,6 +102,7 @@ struct StaticDescriptorInitializer_log_5freplication_2eproto {
 // ===================================================================
 
 #ifndef _MSC_VER
+const int Replication::kFileIDFieldNumber;
 const int Replication::kFileoffsetFieldNumber;
 const int Replication::kDataSizeFieldNumber;
 const int Replication::kLogDataFieldNumber;
@@ -121,6 +124,7 @@ Replication::Replication(const Replication& from)
 
 void Replication::SharedCtor() {
   _cached_size_ = 0;
+  fileid_ = 0;
   fileoffset_ = GOOGLE_LONGLONG(0);
   data_size_ = GOOGLE_LONGLONG(0);
   log_data_ = const_cast< ::std::string*>(&::google::protobuf::internal::kEmptyString);
@@ -162,6 +166,7 @@ Replication* Replication::New() const {
 
 void Replication::Clear() {
   if (_has_bits_[0 / 32] & (0xffu << (0 % 32))) {
+    fileid_ = 0;
     fileoffset_ = GOOGLE_LONGLONG(0);
     data_size_ = GOOGLE_LONGLONG(0);
     if (has_log_data()) {
@@ -180,10 +185,26 @@ bool Replication::MergePartialFromCodedStream(
   ::google::protobuf::uint32 tag;
   while ((tag = input->ReadTag()) != 0) {
     switch (::google::protobuf::internal::WireFormatLite::GetTagFieldNumber(tag)) {
-      // required int64 fileoffset = 1;
+      // required int32 fileID = 1;
       case 1: {
         if (::google::protobuf::internal::WireFormatLite::GetTagWireType(tag) ==
             ::google::protobuf::internal::WireFormatLite::WIRETYPE_VARINT) {
+          DO_((::google::protobuf::internal::WireFormatLite::ReadPrimitive<
+                   ::google::protobuf::int32, ::google::protobuf::internal::WireFormatLite::TYPE_INT32>(
+                 input, &fileid_)));
+          set_has_fileid();
+        } else {
+          goto handle_uninterpreted;
+        }
+        if (input->ExpectTag(16)) goto parse_fileoffset;
+        break;
+      }
+
+      // required int64 fileoffset = 2;
+      case 2: {
+        if (::google::protobuf::internal::WireFormatLite::GetTagWireType(tag) ==
+            ::google::protobuf::internal::WireFormatLite::WIRETYPE_VARINT) {
+         parse_fileoffset:
           DO_((::google::protobuf::internal::WireFormatLite::ReadPrimitive<
                    ::google::protobuf::int64, ::google::protobuf::internal::WireFormatLite::TYPE_INT64>(
                  input, &fileoffset_)));
@@ -191,12 +212,12 @@ bool Replication::MergePartialFromCodedStream(
         } else {
           goto handle_uninterpreted;
         }
-        if (input->ExpectTag(16)) goto parse_data_size;
+        if (input->ExpectTag(24)) goto parse_data_size;
         break;
       }
 
-      // required int64 data_size = 2;
-      case 2: {
+      // required int64 data_size = 3;
+      case 3: {
         if (::google::protobuf::internal::WireFormatLite::GetTagWireType(tag) ==
             ::google::protobuf::internal::WireFormatLite::WIRETYPE_VARINT) {
          parse_data_size:
@@ -207,12 +228,12 @@ bool Replication::MergePartialFromCodedStream(
         } else {
           goto handle_uninterpreted;
         }
-        if (input->ExpectTag(26)) goto parse_log_data;
+        if (input->ExpectTag(34)) goto parse_log_data;
         break;
       }
 
-      // required bytes log_data = 3;
-      case 3: {
+      // required bytes log_data = 4;
+      case 4: {
         if (::google::protobuf::internal::WireFormatLite::GetTagWireType(tag) ==
             ::google::protobuf::internal::WireFormatLite::WIRETYPE_LENGTH_DELIMITED) {
          parse_log_data:
@@ -243,20 +264,25 @@ bool Replication::MergePartialFromCodedStream(
 
 void Replication::SerializeWithCachedSizes(
     ::google::protobuf::io::CodedOutputStream* output) const {
-  // required int64 fileoffset = 1;
+  // required int32 fileID = 1;
+  if (has_fileid()) {
+    ::google::protobuf::internal::WireFormatLite::WriteInt32(1, this->fileid(), output);
+  }
+
+  // required int64 fileoffset = 2;
   if (has_fileoffset()) {
-    ::google::protobuf::internal::WireFormatLite::WriteInt64(1, this->fileoffset(), output);
+    ::google::protobuf::internal::WireFormatLite::WriteInt64(2, this->fileoffset(), output);
   }
 
-  // required int64 data_size = 2;
+  // required int64 data_size = 3;
   if (has_data_size()) {
-    ::google::protobuf::internal::WireFormatLite::WriteInt64(2, this->data_size(), output);
+    ::google::protobuf::internal::WireFormatLite::WriteInt64(3, this->data_size(), output);
   }
 
-  // required bytes log_data = 3;
+  // required bytes log_data = 4;
   if (has_log_data()) {
     ::google::protobuf::internal::WireFormatLite::WriteBytes(
-      3, this->log_data(), output);
+      4, this->log_data(), output);
   }
 
   if (!unknown_fields().empty()) {
@@ -267,21 +293,26 @@ void Replication::SerializeWithCachedSizes(
 
 ::google::protobuf::uint8* Replication::SerializeWithCachedSizesToArray(
     ::google::protobuf::uint8* target) const {
-  // required int64 fileoffset = 1;
+  // required int32 fileID = 1;
+  if (has_fileid()) {
+    target = ::google::protobuf::internal::WireFormatLite::WriteInt32ToArray(1, this->fileid(), target);
+  }
+
+  // required int64 fileoffset = 2;
   if (has_fileoffset()) {
-    target = ::google::protobuf::internal::WireFormatLite::WriteInt64ToArray(1, this->fileoffset(), target);
+    target = ::google::protobuf::internal::WireFormatLite::WriteInt64ToArray(2, this->fileoffset(), target);
   }
 
-  // required int64 data_size = 2;
+  // required int64 data_size = 3;
   if (has_data_size()) {
-    target = ::google::protobuf::internal::WireFormatLite::WriteInt64ToArray(2, this->data_size(), target);
+    target = ::google::protobuf::internal::WireFormatLite::WriteInt64ToArray(3, this->data_size(), target);
   }
 
-  // required bytes log_data = 3;
+  // required bytes log_data = 4;
   if (has_log_data()) {
     target =
       ::google::protobuf::internal::WireFormatLite::WriteBytesToArray(
-        3, this->log_data(), target);
+        4, this->log_data(), target);
   }
 
   if (!unknown_fields().empty()) {
@@ -295,21 +326,28 @@ int Replication::ByteSize() const {
   int total_size = 0;
 
   if (_has_bits_[0 / 32] & (0xffu << (0 % 32))) {
-    // required int64 fileoffset = 1;
+    // required int32 fileID = 1;
+    if (has_fileid()) {
+      total_size += 1 +
+        ::google::protobuf::internal::WireFormatLite::Int32Size(
+          this->fileid());
+    }
+
+    // required int64 fileoffset = 2;
     if (has_fileoffset()) {
       total_size += 1 +
         ::google::protobuf::internal::WireFormatLite::Int64Size(
           this->fileoffset());
     }
 
-    // required int64 data_size = 2;
+    // required int64 data_size = 3;
     if (has_data_size()) {
       total_size += 1 +
         ::google::protobuf::internal::WireFormatLite::Int64Size(
           this->data_size());
     }
 
-    // required bytes log_data = 3;
+    // required bytes log_data = 4;
     if (has_log_data()) {
       total_size += 1 +
         ::google::protobuf::internal::WireFormatLite::BytesSize(
@@ -343,6 +381,9 @@ void Replication::MergeFrom(const ::google::protobuf::Message& from) {
 void Replication::MergeFrom(const Replication& from) {
   GOOGLE_CHECK_NE(&from, this);
   if (from._has_bits_[0 / 32] & (0xffu << (0 % 32))) {
+    if (from.has_fileid()) {
+      set_fileid(from.fileid());
+    }
     if (from.has_fileoffset()) {
       set_fileoffset(from.fileoffset());
     }
@@ -369,13 +410,14 @@ void Replication::CopyFrom(const Replication& from) {
 }
 
 bool Replication::IsInitialized() const {
-  if ((_has_bits_[0] & 0x00000007) != 0x00000007) return false;
+  if ((_has_bits_[0] & 0x0000000f) != 0x0000000f) return false;
 
   return true;
 }
 
 void Replication::Swap(Replication* other) {
   if (other != this) {
+    std::swap(fileid_, other->fileid_);
     std::swap(fileoffset_, other->fileoffset_);
     std::swap(data_size_, other->data_size_);
     std::swap(log_data_, other->log_data_);

@@ -1465,7 +1465,7 @@ lsn_t log_core::flush_daemon_work(lsn_t old_mark)
                     iovec_t((char*)boz,         grand_total-total),
             };
 
-	    char * msg = new char[end1-start1+end2-start2+s->length()+grand_total-total]();
+	    char * msg = new char[sizeof(int)+end1-start1+end2-start2+s->length()+grand_total-total]();
 	    assert(msg != NULL);
 	    int pos = 0;
 
@@ -1479,6 +1479,7 @@ lsn_t log_core::flush_daemon_work(lsn_t old_mark)
 	    }
 	    // Generate a log_replication message
 	    replication::Replication rep;
+	    rep.set_fileid(start_lsn.file());
 	    rep.set_fileoffset(file_offset);
 	    rep.set_data_size(end1-start1+end2-start2+s->length()+grand_total-total);
 	    rep.set_log_data(msg,pos);

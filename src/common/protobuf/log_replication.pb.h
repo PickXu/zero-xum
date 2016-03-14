@@ -91,24 +91,31 @@ class Replication : public ::google::protobuf::Message {
 
   // accessors -------------------------------------------------------
 
-  // required int64 fileoffset = 1;
+  // required int32 fileID = 1;
+  inline bool has_fileid() const;
+  inline void clear_fileid();
+  static const int kFileIDFieldNumber = 1;
+  inline ::google::protobuf::int32 fileid() const;
+  inline void set_fileid(::google::protobuf::int32 value);
+
+  // required int64 fileoffset = 2;
   inline bool has_fileoffset() const;
   inline void clear_fileoffset();
-  static const int kFileoffsetFieldNumber = 1;
+  static const int kFileoffsetFieldNumber = 2;
   inline ::google::protobuf::int64 fileoffset() const;
   inline void set_fileoffset(::google::protobuf::int64 value);
 
-  // required int64 data_size = 2;
+  // required int64 data_size = 3;
   inline bool has_data_size() const;
   inline void clear_data_size();
-  static const int kDataSizeFieldNumber = 2;
+  static const int kDataSizeFieldNumber = 3;
   inline ::google::protobuf::int64 data_size() const;
   inline void set_data_size(::google::protobuf::int64 value);
 
-  // required bytes log_data = 3;
+  // required bytes log_data = 4;
   inline bool has_log_data() const;
   inline void clear_log_data();
-  static const int kLogDataFieldNumber = 3;
+  static const int kLogDataFieldNumber = 4;
   inline const ::std::string& log_data() const;
   inline void set_log_data(const ::std::string& value);
   inline void set_log_data(const char* value);
@@ -119,6 +126,8 @@ class Replication : public ::google::protobuf::Message {
 
   // @@protoc_insertion_point(class_scope:replication.Replication)
  private:
+  inline void set_has_fileid();
+  inline void clear_has_fileid();
   inline void set_has_fileoffset();
   inline void clear_has_fileoffset();
   inline void set_has_data_size();
@@ -131,9 +140,10 @@ class Replication : public ::google::protobuf::Message {
   ::google::protobuf::int64 fileoffset_;
   ::google::protobuf::int64 data_size_;
   ::std::string* log_data_;
+  ::google::protobuf::int32 fileid_;
 
   mutable int _cached_size_;
-  ::google::protobuf::uint32 _has_bits_[(3 + 31) / 32];
+  ::google::protobuf::uint32 _has_bits_[(4 + 31) / 32];
 
   friend void  protobuf_AddDesc_log_5freplication_2eproto();
   friend void protobuf_AssignDesc_log_5freplication_2eproto();
@@ -149,15 +159,37 @@ class Replication : public ::google::protobuf::Message {
 
 // Replication
 
-// required int64 fileoffset = 1;
-inline bool Replication::has_fileoffset() const {
+// required int32 fileID = 1;
+inline bool Replication::has_fileid() const {
   return (_has_bits_[0] & 0x00000001u) != 0;
 }
-inline void Replication::set_has_fileoffset() {
+inline void Replication::set_has_fileid() {
   _has_bits_[0] |= 0x00000001u;
 }
-inline void Replication::clear_has_fileoffset() {
+inline void Replication::clear_has_fileid() {
   _has_bits_[0] &= ~0x00000001u;
+}
+inline void Replication::clear_fileid() {
+  fileid_ = 0;
+  clear_has_fileid();
+}
+inline ::google::protobuf::int32 Replication::fileid() const {
+  return fileid_;
+}
+inline void Replication::set_fileid(::google::protobuf::int32 value) {
+  set_has_fileid();
+  fileid_ = value;
+}
+
+// required int64 fileoffset = 2;
+inline bool Replication::has_fileoffset() const {
+  return (_has_bits_[0] & 0x00000002u) != 0;
+}
+inline void Replication::set_has_fileoffset() {
+  _has_bits_[0] |= 0x00000002u;
+}
+inline void Replication::clear_has_fileoffset() {
+  _has_bits_[0] &= ~0x00000002u;
 }
 inline void Replication::clear_fileoffset() {
   fileoffset_ = GOOGLE_LONGLONG(0);
@@ -171,15 +203,15 @@ inline void Replication::set_fileoffset(::google::protobuf::int64 value) {
   fileoffset_ = value;
 }
 
-// required int64 data_size = 2;
+// required int64 data_size = 3;
 inline bool Replication::has_data_size() const {
-  return (_has_bits_[0] & 0x00000002u) != 0;
+  return (_has_bits_[0] & 0x00000004u) != 0;
 }
 inline void Replication::set_has_data_size() {
-  _has_bits_[0] |= 0x00000002u;
+  _has_bits_[0] |= 0x00000004u;
 }
 inline void Replication::clear_has_data_size() {
-  _has_bits_[0] &= ~0x00000002u;
+  _has_bits_[0] &= ~0x00000004u;
 }
 inline void Replication::clear_data_size() {
   data_size_ = GOOGLE_LONGLONG(0);
@@ -193,15 +225,15 @@ inline void Replication::set_data_size(::google::protobuf::int64 value) {
   data_size_ = value;
 }
 
-// required bytes log_data = 3;
+// required bytes log_data = 4;
 inline bool Replication::has_log_data() const {
-  return (_has_bits_[0] & 0x00000004u) != 0;
+  return (_has_bits_[0] & 0x00000008u) != 0;
 }
 inline void Replication::set_has_log_data() {
-  _has_bits_[0] |= 0x00000004u;
+  _has_bits_[0] |= 0x00000008u;
 }
 inline void Replication::clear_has_log_data() {
-  _has_bits_[0] &= ~0x00000004u;
+  _has_bits_[0] &= ~0x00000008u;
 }
 inline void Replication::clear_log_data() {
   if (log_data_ != &::google::protobuf::internal::kEmptyString) {
