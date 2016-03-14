@@ -190,6 +190,7 @@ void Replica::loadOptions(sm_options& options, bool isPrimary)
 	if (!archdir.empty()) {
 		options.set_string_option("sm_archdir", archdir);
 	        options.set_bool_option("sm_archiver_eager", true);
+		options.set_bool_option("sm_archiving", true);
         	mkdirs(archdir);
     	}
     } else {
@@ -374,6 +375,11 @@ void Replica::runBenchmark(bool isPrimary)
 		TRACE(TRACE_ALWAYS, "[Primary] end measurement\n");
 		p_shoreEnv->print_throughput(opt_queried_sf, true, 4, delay, miochs, usage);
 	} else {
+		// Set the volume as failed
+		vol_t* vol = smlevel_0::vol;
+		w_assert0(vol);
+		vol->mark_failed(false);
+
 		s_shoreEnv->reset_stats();
 		stopwatch_t timer;
 		TRACE(TRACE_ALWAYS, "[Secondary] begin measurement\n");
@@ -488,8 +494,9 @@ void Replica::run()
     //t->fork();
 
     // Start the log achive migration thread if archive is set
+    MigrateThread* mt;
     if (!archdir.empty()){
-	    MigrateThread* mt = new MigrateThread(archdir, "5000", 5);
+	    mt = new MigrateThread(archdir, "5000", 5);
 	    mt->fork();
     }
 
@@ -501,6 +508,8 @@ void Replica::run()
     string msg_content("CTRL-MSG: FIN");
     zmq::message_t ctrl_msg((void*)msg_content.data(),13, NULL);
     _ps.send(ctrl_msg);
+
+    if (mt) mt->stop();
    
     } else {
     string host("128.135.11.115");
