@@ -65,7 +65,7 @@ public:
 	    zmq::socket_t _subscriber (_context, ZMQ_SUB);
 	    std::fstream myfile;
 
-	    _subscriber.connect("tcp://"+host+":"+port);
+	    _subscriber.connect(("tcp://"+host+":"+port).c_str());
 	    _subscriber.setsockopt(ZMQ_SUBSCRIBE, "",0);
 	    
 	    std::cout << "Enter subscriber ... " << std::endl;
@@ -158,6 +158,9 @@ void Replica::loadOptions(sm_options& options, bool isPrimary)
 	options.set_string_option("sm_logdir", s_logdir);
 	options.set_string_option("sm_logport", "5557");
 	options.set_bool_option("sm_restart_instant", true);
+	options.set_bool_option("sm_restore_instant", true);
+	options.set_bool_option("sm_restore_sched_singlepass", true);
+	options.set_bool_option("sm_restore_sched_ondemand", true);
 	mkdirs(s_logdir);
     }
 
@@ -365,28 +368,22 @@ void Replica::archiveLog()
 
 void Replica::copyDevice()
 {
+/*
+    // COPY LOCAL FILE
     std::ifstream source;
     std::ofstream target;
 
-    //std::ifstream slog;
-    //std::ofstream tlog;
 
     source.open(opt_dbfile,std::ios::binary);
     target.open(s_dbfile,std::ios::binary);
 
     target << source.rdbuf();
 
-    //slog.open("log/log.1",std::ios::binary);
-    //tlog.open("log_replica/log.1",std::ios::binary|std::ios::trunc);
-
-    //tlog << slog.rdbuf();
-
     source.close();
     target.close();
+*/
 
-    //slog.close();
-    //tlog.close();
-        
+    system("rsync -avz xum@128.135.11.115:~/Documents/DB/zero/build/src/cmd/db sdb");
 }
 
 int getPrimary()
@@ -449,21 +446,25 @@ void Replica::run()
     finishPrimary();
    
     } else {
-    string host("localhost");
-    string port("5556");
+    string host("128.135.11.115");
+    string port1("5556");	// Port for log replication
+    string port2("6667");	// Port for out-of-band control
 
     // Start the subscriber to receive log records
     // from the primary
-    Subscriber* sub = new Subscriber(s_logdir,host,port);
+    Subscriber* sub = new Subscriber(s_logdir,host,port1);
     sub->fork();
 
-    ::sleep(2);
+    zmq::context_t _context (1);
+    zmq::socket_t _ss (_context, ZMQ_SUB);
 
-    // Wait till the primary finish its job
-    while(getPrimary() > 0){
-	cout << "waiting for primary to finish ..." << endl;
-	::sleep(1);
-    }
+    _ss.connect(("tcp://"+host+":"+port2).c_str());
+    _ss.setsockopt(ZMQ_SUBSCRIBE, "CTRL-MSG",8);    
+
+    zmq::message_t _ctrl_msg;
+    do {
+        _ss.recv(&_ctrl_msg);
+    } while(strncmp((const char *)_ctrl_msg.data(), "CTRL-MSG: FIN",13) != 0);
 
     sub->stop();
 
@@ -480,7 +481,5 @@ void Replica::run()
     runBenchmark(false);
 
     finishSecondary();
-    sub->join();
-
     }
 }
