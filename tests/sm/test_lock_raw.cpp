@@ -6,12 +6,12 @@
 #include "lock_raw.h"
 #include "lock_core.h"
 #include "sm_base.h"
-#include "log.h"
+#include "log_core.h"
 #include "log_lsn_tracker.h"
 #include "lock.h"
 #include "w_okvl_inl.h"
 #include "w_endian.h"
-#include "../fc/local_random.h"
+#include "../common/local_random.h"
 
 sm_options make_options(bool has_init = true, bool small = true) {
     sm_options options;

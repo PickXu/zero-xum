@@ -158,6 +158,8 @@ void Command::setupSMOptions()
         "Path to the file on which to store database pages")
     ("sm_log_partition_size", po::value<int>()->default_value(1024),
         "Size of a log partition in MB")
+    ("sm_log_max_partitions", po::value<int>()->default_value(0),
+        "Maximum number of partitions maintained in log directory")
     ("sm_bufpoolsize", po::value<int>()->default_value(1024),
         "Size of buffer pool in MB")
     ("sm_fakeiodelay-enable", po::value<int>()->default_value(0),
@@ -191,6 +193,8 @@ void Command::setupSMOptions()
     ("sm_vol_readonly", po::value<bool>(),
         "Volume will be opened in read-only mode and all writes from buffer pool \
          will be ignored (uses write elision and single-page recovery)")
+    ("sm_vol_o_direct", po::value<bool>(),
+        "Whether to open volume (i.e., db file) with O_DIRECT")
     ("sm_restart_instant", po::value<bool>(),
         "Enable instant restart")
     ("sm_restart_log_based_redo", po::value<bool>(),

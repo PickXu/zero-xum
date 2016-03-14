@@ -4,6 +4,7 @@
 
 #include "restore.h"
 #include "logarchiver.h"
+#include "log_core.h"
 #include "vol.h"
 #include "sm_options.h"
 #include "backup_reader.h"
@@ -134,11 +135,11 @@ bool RestoreScheduler::hasWaitingRequest()
     return onDemand && queue.size() > 0;
 }
 
-PageID RestoreScheduler::next(bool peek)
+bool RestoreScheduler::next(PageID& next, bool peek)
 {
     spinlock_write_critical_section cs(&mutex);
 
-    PageID next = firstNotRestored;
+    next = firstNotRestored;
     if (onDemand && queue.size() > 0) {
         next = queue.front();
         if (!peek) {
@@ -162,7 +163,7 @@ PageID RestoreScheduler::next(bool peek)
     }
     else {
         w_assert0(onDemand);
-        next = PageID(0); // no next pid for now
+        return false;
     }
 
     /*
@@ -175,7 +176,7 @@ PageID RestoreScheduler::next(bool peek)
      * is guaranteed to not be restored when is is picked up by the restore
      * loop, but that may change in the future.
      */
-    return next;
+    return true;
 }
 
 void RestoreScheduler::setSinglePass(bool singlePass)
@@ -314,19 +315,24 @@ RestoreMgr::RestoreMgr(const sm_options& options,
     replayedBitmap = new RestoreBitmap(lastUsedPid / segmentSize + 1);
 }
 
-void RestoreMgr::shutdown()
+bool RestoreMgr::try_shutdown()
 {
-    while (true) {
-        // Try to set pin from 0 to -1 until we succeed. Only then it is
-        // guaranteed that nobody will access the restore manager anymore.
-        usleep(1000); // 1ms
-        int32_t z = 0;
-        if (lintel::unsafe::atomic_compare_exchange_strong(&pinCount, &z, -1))
-        { break; }
+    if (pinCount < 0) {
+        // we've already shut down
+        return true;
     }
 
-    w_assert0(finished());
-    join();
+    // Try to atomically switch pin count from 0 to -1. If that fails, it means
+    // someone is still using us and we can't shutdown.
+    int32_t z = 0;
+    if (!lintel::unsafe::atomic_compare_exchange_strong(&pinCount, &z, -1)) {
+        return false;
+    }
+
+    if (!finished()) {
+        // restore not finished yet -- can't shutdown
+        return false;
+    }
 
     if (asyncWriter) {
         asyncWriter->shutdown();
@@ -334,6 +340,7 @@ void RestoreMgr::shutdown()
     }
 
     backup->finish();
+    return true;
 }
 
 RestoreMgr::~RestoreMgr()
@@ -427,8 +434,7 @@ void RestoreMgr::restoreSegment(char* workspace,
     fixable_page_h fixable;
     PageID current = firstPage;
     PageID prevPage = 0;
-    size_t redone = 0;
-    bool virgin = false;
+    size_t redone = 0, redoneOnPage = 0;
     unsigned segment = getSegmentForPid(firstPage);
 
     logrec_t* lr;
@@ -443,13 +449,14 @@ void RestoreMgr::restoreSegment(char* workspace,
 
         while (lrpid > current) {
             // Done with current page -- move to next
-            virgin = !volume->is_allocated_page(current);
-            if (!virgin) {
-                // Restored pages are always written out with proper checksum.
+            if (redoneOnPage > 0) {
+                // write checksum on non-free pages
                 page->checksum = page->calculate_checksum();
             }
+
             current++;
             page++;
+            redoneOnPage = 0;
 
             if (lrpid > lastUsedPid || getSegmentForPid(current) != segment) {
                 // Time to move to a new segment (multiple-segment restore)
@@ -482,23 +489,17 @@ void RestoreMgr::restoreSegment(char* workspace,
 
                 INC_TSTAT(restore_multiple_segments);
             }
-
         }
 
         w_assert1(lrpid < firstPage + segmentSize);
 
-        if (virgin) {
-            DBG3(<< "Skipped virgin page " << current);
-            continue;
-        }
-
         w_assert1(page->pid == 0 || page->pid == current);
 
         if (!fixable.is_fixed() || fixable.pid() != lrpid) {
-            // PID is manually set for virgin pages
-            // this guarantees correct redo of multi-page logrecs
+            // Set PID and null LSN manually on virgin pages
             if (page->pid != lrpid) {
                 page->pid = lrpid;
+                page->lsn = lsn_t::null;
             }
             fixable.setup_for_restore(page);
         }
@@ -519,8 +520,7 @@ void RestoreMgr::restoreSegment(char* workspace,
 
         prevPage = lrpid;
         redone++;
-
-        virgin = false;
+        redoneOnPage++;
     }
 
     // current should point to the first not-restored page (excl. bound)
@@ -547,12 +547,17 @@ void RestoreMgr::restoreLoop()
     stopwatch_t timer;
 
     while (numRestoredPages < lastUsedPid) {
-        PageID requested = scheduler->next();
+//<<<<<<< HEAD
+        //PageID requested = scheduler->next();
         //if (requested == PageID(0)) {
+//=======
+        PageID requested;
+        if (!scheduler->next(requested)) {
+//>>>>>>> 19bf838d8015c0a9b3d5339fba7f51edc0d583a7
             // no page available for now
-       //     usleep(2000); // 2 ms
-       //     continue;
-        //}
+            usleep(2000); // 2 ms
+            continue;
+        }
         ERROUT(<< "Log archiver HEHE!!!");
 
         timer.reset();
@@ -573,12 +578,10 @@ void RestoreMgr::restoreLoop()
         PageID startPID = firstPage;
         PageID endPID = preemptive ? 0 : firstPage + segmentSize;
 
-        size_t actualSegmentSize = segmentSize;
-
         lsn_t backupLSN = volume->get_backup_lsn();
 
         LogArchiver::ArchiveScanner::RunMerger* merger =
-            logScan.open(startPID, endPID, backupLSN, actualSegmentSize);
+            logScan.open(startPID, endPID, backupLSN, 0);
 
         DBG3(<< "RunMerger opened with " << merger->heapSize() << " runs"
                 << " starting on LSN " << backupLSN);
@@ -652,7 +655,10 @@ void RestoreMgr::finishSegment(char* workspace, unsigned segment, size_t count)
     // as we're done with one segment, prefetch the next
     if (scheduler->isOnDemand()) {
         if (scheduler->hasWaitingRequest()) {
-            backup->prefetch(scheduler->next(true /* peek */));
+            PageID next;
+            if (scheduler->next(next, true /* peek */)) {
+                backup->prefetch(next);
+            }
         } else {
             backup->prefetch(segment + 1);
         }
@@ -770,6 +776,11 @@ void RestoreMgr::run()
     sys_xct_section_t ssx(true);
     log_restore_end();
     ssx.end_sys_xct(RCOK);
+
+    while (!try_shutdown()) {
+        ::usleep(1000000); // 1 sec
+    }
+    w_assert0(finished());
 }
 
 SegmentWriter::SegmentWriter(RestoreMgr* restore)

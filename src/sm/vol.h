@@ -192,6 +192,9 @@ private:
      *  (128 bytes are enough since it contains only vid) */
     char _logrec_buf[128];
 
+    /** Whether to open file with O_DIRECT */
+    bool _use_o_direct;
+
     rc_t dismount(bool abrupt = false);
 
     /** Open backup file descriptor for retore or taking new backup */
@@ -206,9 +209,6 @@ private:
 
     lsn_t get_dirty_page_emlsn(PageID pid) const;
     void delete_dirty_page(PageID pid);
-
-    /** If media failure happened, wait for metadata to be restored */
-    void check_metadata_restored() const;
 };
 
 inline bool vol_t::is_valid_store(StoreID f) const

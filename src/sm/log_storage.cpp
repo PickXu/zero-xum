@@ -4,21 +4,29 @@
 
 #include "w_defines.h"
 
+// CS TODO: this has to come before sm_base because w_base.h defines
+// a macro called "align", which is probably the name of a function
+// or something inside boost regex
+#include <boost/regex.hpp>
+
 #define SM_SOURCE
 #define LOG_STORAGE_C
 
 #include "sm_base.h"
 #include "chkpt.h"
 
-#include <regex>
 #include <cstdio>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <os_interface.h>
-#include <largefile_aware.h>
+#include <atomic>
+#include <thread>
+#include <chrono>
 
 #include "log_storage.h"
 #include "log_core.h"
+#include "srwlock.h"
+
 // needed for skip_log (TODO fix this)
 #include "logdef_gen.cpp"
 
@@ -26,62 +34,88 @@ typedef smlevel_0::fileoff_t fileoff_t;
 const string log_storage::log_prefix = "log.";
 const string log_storage::log_regex = "log\\.[1-9][0-9]*";
 
+class partition_recycler_t : public smthread_t
+{
+public:
+    partition_recycler_t(log_storage* storage)
+        : smthread_t(t_regular, "partition_recycler"), storage(storage),
+        retire(false)
+    {}
+
+    virtual ~partition_recycler_t() {}
+
+    void run()
+    {
+        while (!retire) {
+            unique_lock<mutex> lck(_recycler_mutex);
+            _recycler_condvar.wait(lck);
+            if (retire) { break; }
+            storage->delete_old_partitions();
+        }
+    }
+
+    void wakeup()
+    {
+        unique_lock<mutex> lck(_recycler_mutex);
+        _recycler_condvar.notify_one();
+    }
+
+    log_storage* storage;
+    std::atomic<bool> retire;
+    std::condition_variable _recycler_condvar;
+    std::mutex _recycler_mutex;
+};
+
 /*
  * Opens log files in logdir and initializes partitions as well as the
  * given LSN's. The buffer given in prime_buf is primed with the contents
  * found in the last block of the last partition -- this logic was moved
  * from the various prime methods of the old log_core.
  */
-log_storage::log_storage(const char* path, bool reformat, lsn_t& curr_lsn,
-        lsn_t& durable_lsn, lsn_t& flush_lsn, long segsize)
+log_storage::log_storage(const sm_options& options)
     :
-        _segsize(segsize),
-        _partition_size(0),
-        _partition_data_size(0),
-        _curr_partition(NULL),
-        _logpath(path)
+        _skip_log(new skip_log)
 {
-    _logdir = new char[strlen(path) + 1]; // +1 for \0 byte
-    strcpy(_logdir, path);
+    std::string logdir = options.get_string_option("sm_logdir", "");
+    if (logdir.empty()) {
+        cerr << "ERROR: sm_logdir must be set to enable logging." << endl;
+        W_FATAL(eCRASH);
+    }
+    _logpath = logdir;
 
-    _skip_log = new skip_log;
-
-    // By the time we get here, the max_logsize should already have been
-    // adjusted by the sm options-handling code, so it should be
-    // a legitimate value now.
-    W_COERCE(_set_partition_size(log_common::partition_size));
-
-    // FRJ: we don't actually *need* this (no trx around yet), but we
-    // don't want to trip the assertions that watch for it.
-    CRITICAL_SECTION(cs, _partition_lock);
-
-    partition_number_t  last_partition = 1;
+    bool reformat = options.get_bool_option("sm_format", false);
 
     if (!reformat && !fs::exists(_logpath)) {
-        cerr << "Error: could not open the log directory " << dir_name() <<endl;
+        cerr << "Error: could not open the log directory " << logdir <<endl;
         W_COERCE(RC(eOS));
     }
 
+    fileoff_t psize = fileoff_t(options.get_int_option("sm_log_partition_size", 1024));
+    // option given in MB -> convert to B
+    psize = psize * 1024 * 1024;
+    // round to next multiple of the log buffer segment size
+    psize = (psize / log_core::SEGMENT_SIZE) * log_core::SEGMENT_SIZE;
+    _partition_size = psize;
+
+    // maximum number of partitions on the filesystem
+    _max_partitions = options.get_int_option("sm_log_max_partitions", 0);
+
+    partition_number_t  last_partition = 1;
+
     fs::directory_iterator it(_logpath), eod;
-    std::regex rx(log_regex, std::regex::basic);
+    boost::regex rx(log_regex, boost::regex::basic);
     for (; it != eod; it++) {
         fs::path fpath = it->path();
         string fname = fpath.filename().string();
 
-        if (regex_match(fname, rx)) {
+        if (boost::regex_match(fname, rx)) {
             if (reformat) {
                 fs::remove(fpath);
                 continue;
             }
 
             long pnum = std::stoi(fname.substr(log_prefix.length()));
-            partition_t* p = new partition_t();
-            p->init(this);
-            p->peek(pnum, lsn_t::null /* end_hint */, true);
-            p->open_for_read(pnum, true);
-
-            _partitions[pnum] = p;
-            p->close();
+            _partitions[pnum] = make_shared<partition_t>(this, pnum);
 
             if (pnum >= last_partition) {
                 last_partition = pnum;
@@ -96,21 +130,15 @@ log_storage::log_storage(const char* path, bool reformat, lsn_t& curr_lsn,
 
 
 
-    // Truncate and open current partition for append
-    size_t pos = partition_t::truncate_for_append(last_partition,
-            make_log_name(last_partition));
-    lsn_t new_lsn(last_partition, pos);
-    curr_lsn = durable_lsn = flush_lsn = new_lsn;
-
-    partition_t* p = get_partition(last_partition);
+    auto p = get_partition(last_partition);
     if (!p) {
         create_partition(last_partition);
         p = get_partition(last_partition);
         w_assert0(p);
     }
-    p->open_for_append(last_partition, lsn_t::null /* end hint */);
+
+    W_COERCE(p->open_for_append());
     _curr_partition = p;
-    w_assert1(durable_lsn == curr_lsn);
 
     if(!p) {
         cerr << "ERROR: could not open log file for partition "
@@ -123,24 +151,29 @@ log_storage::log_storage(const char* path, bool reformat, lsn_t& curr_lsn,
 
 log_storage::~log_storage()
 {
-    partition_t* p;
+    if (_recycler_thread) {
+        _recycler_thread->retire = true;
+        _recycler_thread->wakeup();
+        _recycler_thread->join();
+        _recycler_thread = nullptr;
+    }
+
+    spinlock_write_critical_section cs(&_partition_map_latch);
+
     partition_map_t::iterator it = _partitions.begin();
     while (it != _partitions.end()) {
-        p = it->second;
+        auto p = it->second;
         p->close_for_read();
         p->close_for_append();
-        p->clear();
         it++;
     }
 
     _partitions.clear();
 
     delete _skip_log;
-    delete _logdir;
 }
 
-partition_t *
-log_storage::get_partition_for_flush(lsn_t start_lsn,
+shared_ptr<partition_t> log_storage::get_partition_for_flush(lsn_t start_lsn,
         long start1, long end1, long start2, long end2)
 {
     w_assert1(end1 >= start1);
@@ -150,52 +183,27 @@ log_storage::get_partition_for_flush(lsn_t start_lsn,
     // This will open a new file when the given start_lsn has a
     // different file() portion from the current partition()'s
     // partition number, so the start_lsn is the clue.
-    partition_t* p = curr_partition();
+    auto p = curr_partition();
     if(start_lsn.file() != p->num()) {
         partition_number_t n = p->num();
         w_assert3(start_lsn.file() == n+1);
         w_assert3(n != 0);
 
         {
-            // CS TODO: this may deadlock because recycling also needs _partition_lock
-            // grab the lock -- we're about to mess with partitions
-            CRITICAL_SECTION(cs, _partition_lock);
-            p->close();
+            W_COERCE(p->close_for_append());
             p = create_partition(n+1);
-            p->open_for_append(n+1, lsn_t::null);
-            _curr_partition = p;
+            W_COERCE(p->open_for_append());
         }
-
-        // it's a new partition -- size is now 0
-        w_assert3(curr_partition()->size()== 0);
     }
 
     return p;
 }
 
-fileoff_t log_storage::partition_size(long psize)
+shared_ptr<partition_t> log_storage::get_partition(partition_number_t n) const
 {
-     long p = psize - BLOCK_SIZE;
-     return _floor(p, log_core::SEGMENT_SIZE) + BLOCK_SIZE;
-}
-
-fileoff_t log_storage::min_partition_size()
-{
-     return _floor(log_core::SEGMENT_SIZE, log_core::SEGMENT_SIZE)
-         + BLOCK_SIZE;
-}
-
-fileoff_t log_storage::max_partition_size()
-{
-    fileoff_t tmp = sthread_t::max_os_file_size;
-    tmp = tmp > lsn_t::max.lo() ? lsn_t::max.lo() : tmp;
-    return  partition_size(tmp);
-}
-
-partition_t* log_storage::get_partition(partition_number_t n) const
-{
+    spinlock_read_critical_section cs(&_partition_map_latch);
     partition_map_t::const_iterator it = _partitions.find(n);
-    if (it == _partitions.end()) { return NULL; }
+    if (it == _partitions.end()) { return nullptr; }
     return it->second;
 }
 
@@ -302,132 +310,109 @@ log_storage::_close_min(partition_number_t n)
     return victim;
 }
 #endif
-
-// Prime buf with the partial block ending at 'next';
-// return the size of that partial block (possibly 0)
-//
-// We are about to write a record for a certain lsn(next).
-// If we haven't been appending to this file (e.g., it's
-// startup), we need to make sure the first part of the buffer
-// contains the last partial block in the file, so that when
-// we append that block to the file, we aren't clobbering the
-// tail of the file (partition).
-//
-// This reads from the given file descriptor, the necessary
-// block to cover the lsn.
-//
-// The start argument (offset from beginning of file (fd) of
-// start of partition) is for support on raw devices; for unix
-// files, it's always zero, since the beginning of the partition
-// is the beginning of the file (fd).
-//
-// This method is public to allow calling from partition_t, which
-// uses this to prime its own buffer for writing a skip record.
-// It is called from the private _prime to prime the segment-sized
-// log buffer _buf.
-long
-log_storage::prime(char* buf, lsn_t next, size_t block_size, bool read_whole_block)
-{
-    // get offset of block that contains "next"
-    sm_diskaddr_t b = sm_diskaddr_t(_floor(next.lo(), block_size));
-
-    long prime_offset = next.lo() - b;
-    /*
-     * CS: Handle case where next is exactly at a block border.
-     * This is used by logbuf_core, where read_whole_block == false.
-     * In that case, we must read the whole segment.
-     * Another way to think of this is that we did not explicitly
-     * require reading the whole block, but the position of next is
-     * telling us to read a whole block.
-     */
-    if (!read_whole_block && prime_offset == 0 && next.lo() > 0) {
-        prime_offset = block_size;
-        b -= block_size;
-    }
-
-    w_assert3(prime_offset >= 0);
-    if(prime_offset > 0) {
-        size_t read_size = read_whole_block ? block_size : prime_offset;
-        w_assert3(read_size > 0);
-        partition_t* p = curr_partition();
-        W_COERCE(me()->pread(p->fhdl_app(), buf, read_size, b));
-    }
-    return prime_offset;
-}
-
-rc_t log_storage::last_lsn_in_partition(partition_number_t pnum, lsn_t& lsn)
-{
-    partition_t* p = get_partition(pnum);
-    if(!p) {
-        lsn = lsn_t::null;
-        return RCOK;
-    }
-
-    W_COERCE(p->open_for_read(pnum, true));
-
-    if (p->size() == partition_t::nosize) {
-        lsn = lsn_t::null;
-        return RCOK;
-    }
-
-    // this partition is already opened
-    lsn = lsn_t(pnum, p->size());
-    return RCOK;
-}
-
-partition_t* log_storage::create_partition(partition_number_t pnum)
+shared_ptr<partition_t> log_storage::create_partition(partition_number_t pnum)
 {
 #if W_DEBUG_LEVEL > 2
     // No other partition may be open for append
-    partition_map_t::iterator it = _partitions.begin();
-    for (; it != _partitions.end(); it++) {
-        w_assert3(!it->second->is_open_for_append());
+    {
+        spinlock_read_critical_section cs(&_partition_map_latch);
+        partition_map_t::iterator it = _partitions.begin();
+        for (; it != _partitions.end(); it++) {
+            w_assert3(!it->second->is_open_for_append());
+        }
     }
 #endif
 
     // we should also free up if necessary, as done in close_min
-    partition_t* p = get_partition(pnum);
+    auto p = get_partition(pnum);
     if (p) {
         W_FATAL_MSG(eINTERNAL, << "Partition " << pnum << " already exists");
     }
 
-    p = new partition_t();
-    p->init(this);
+    p = make_shared<partition_t>(this, pnum);
+    p->set_size(0);
 
     w_assert3(_partitions.find(pnum) == _partitions.end());
-    _partitions[pnum] = p;
+
+    {
+        // Add partition to map but only exit function once it has been
+        // reduced to _max_partitions
+        spinlock_write_critical_section cs(&_partition_map_latch);
+        w_assert1(!_curr_partition || _curr_partition->num() == pnum - 1);
+        _partitions[pnum] = p;
+        _curr_partition = p;
+    }
+
+    // take checkpoint & kick-off partition recycler (oportunistically)
+    if (_max_partitions > 0) {
+        if (smlevel_0::chkpt) { smlevel_0::chkpt->wakeup_thread(); }
+        if (smlevel_0::bf && smlevel_0::bf->get_cleaner()) {
+            smlevel_0::bf->get_cleaner()->wakeup_cleaner();
+        }
+    }
+    wakeup_recycler();
+
+    // The check below does not require the mutex
+    if (_max_partitions > 0 && _partitions.size() > _max_partitions) {
+        // Log full! Try to clean-up old partitions.
+        try_delete(pnum);
+    }
 
     return p;
 }
 
-partition_t * log_storage::curr_partition() const
+void log_storage::wakeup_recycler()
 {
-    return _curr_partition;
+    if (!_recycler_thread) {
+        _recycler_thread.reset(new partition_recycler_t(this));
+        _recycler_thread->fork();
+    }
+    _recycler_thread->wakeup();
 }
 
-w_rc_t log_storage::_set_partition_size(fileoff_t size)
+unsigned log_storage::delete_old_partitions(partition_number_t older_than)
 {
-    fileoff_t usable_psize = size;
-
-    // partition must hold at least one buffer...
-    if (usable_psize < _segsize) {
-        W_FATAL(eOUTOFLOGSPACE);
+    if (older_than == 0 && smlevel_0::chkpt) {
+        lsn_t min_lsn = smlevel_0::chkpt->get_min_active_lsn();
+        older_than = min_lsn.hi();
     }
+    // CS TODO: talk to log archiver!
 
-    // largest integral multiple of segsize() not greater than usable_psize:
-    _partition_data_size = _floor(usable_psize, _segsize);
+    list<shared_ptr<partition_t>> to_be_deleted;
 
-    if(_partition_data_size == 0)
     {
-        cerr << "log size is too small: size "<<size<<" usable_psize "<<usable_psize
-        <<", segsize() "<<_segsize<<", blocksize "<<BLOCK_SIZE<< endl;
-        W_FATAL(eOUTOFLOGSPACE);
-    }
-    _partition_size = _partition_data_size + BLOCK_SIZE;
-    DBGTHRD(<< "log_storage::_set_size setting _partition_size (limit LIMIT) "
-            << _partition_size);
+        spinlock_write_critical_section cs(&_partition_map_latch);
 
-    return RCOK;
+        partition_map_t::iterator it = _partitions.begin();
+        while (it != _partitions.end()) {
+            if (it->first < older_than) {
+                to_be_deleted.push_front(it->second);
+                it = _partitions.erase(it);
+            }
+            else { it++; }
+        }
+    }
+
+    // Waint until the partitions to be deleted are not referenced anymore
+    while (to_be_deleted.size() > 0) {
+        auto p = to_be_deleted.front();
+        to_be_deleted.pop_front();
+        while (!p.unique()) {
+            std::this_thread::sleep_for(chrono::milliseconds(1));
+        }
+        // Now this partition is owned exclusively by me.  Other threads cannot
+        // increment reference counters because objects were removed from map,
+        // and the critical section above guarantees visibility.
+        p->destroy();
+    }
+
+    return to_be_deleted.size();
+}
+
+shared_ptr<partition_t> log_storage::curr_partition() const
+{
+    spinlock_read_critical_section cs(&_partition_map_latch);
+    return _curr_partition;
 }
 
 string log_storage::make_log_name(partition_number_t pnum) const
@@ -440,14 +425,54 @@ fs::path log_storage::make_log_path(partition_number_t pnum) const
     return _logpath / fs::path(log_prefix + to_string(pnum));
 }
 
-void
-log_storage::acquire_partition_lock()
+void log_storage::try_delete(partition_number_t pnum)
 {
-    _partition_lock.acquire(&me()->get_log_me_node());
-}
-void
-log_storage::release_partition_lock()
-{
-    _partition_lock.release(me()->get_log_me_node());
-}
+    /*
+     * Log full -- we must delete a partition before continuing.  But we can't
+     * invoke normal checkpoint & cleaner because they will attempt to generate
+     * log records and block as well.  First we check if the oldest active
+     * transaction (as known by the last checkpoint) has its begin in the
+     * oldest partition file. If that's true, then no partition can be deleted
+     * and we are stuck -- in other words, the log is "wedged". To avoid this,
+     * a log space reservations scheme is required, but since we removed the
+     * old and messy scheme, we must fail here. Since this is a research
+     * prototype and this is quite a corner case, we don't worry too much about
+     * it.
+     */
+    lsn_t min_xct_lsn = smlevel_0::chkpt->get_min_xct_lsn();
+    if (min_xct_lsn.hi() == pnum - _max_partitions) {
+        throw runtime_error("Log wedged! Cannot recycle partitions due to \
+                old active transaction");
+    }
 
+    /*
+     * Now check if any dirty page rec_lsn is in the oldest partition. If
+     * that's true, then we're also stuck like above, because our cleaning
+     * & checkpoint mechanisms require generating log records. We could simply
+     * force all dirty pages from the buffer pool without generating log
+     * records -- that would mean that those older log records would not be
+     * required for recovery. However, the log analysis logic would not know
+     * that without page_write log records. Again, it seems like the solution
+     * is to have a reservation scheme, where enough log space is always reserved
+     * for a full page cleaner round (e.g., one logrec for each frame)
+     */
+    lsn_t min_rec_lsn = smlevel_0::chkpt->get_min_rec_lsn();
+    if (min_rec_lsn.hi() == pnum - _max_partitions) {
+        throw runtime_error("Log wedged! Cannot recycle partitions due to \
+                old dirty pages");
+    }
+
+    /*
+     * Once we get here, we must be able to delete at least one partition
+     * CS-TODO: there's potentially a deadlock here, since
+     * delete_old_partitions will wait until the partition's shared_ptr has no
+     * other references -- if a thread is holding a reference but waiting to
+     * insert something in the full log, we get stuck.
+     */
+    unsigned deleted = delete_old_partitions();
+    if (deleted == 0) {
+        throw runtime_error("Log wedged! Cannot recycle partitions with \
+                the available checkpoint information. Try increasing \
+                max_partitions or partition_size.");
+    }
+}

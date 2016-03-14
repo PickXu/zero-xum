@@ -183,15 +183,7 @@ logrec_t::fill_xct_attr(const tid_t& tid, const lsn_t& last)
 bool
 logrec_t::valid_header(const lsn_t & lsn) const
 {
-    if (header._len < sizeof(baseLogHeader)
-        || header._type >= logrec_t::t_max_logrec
-        || cat() == t_bad_cat
-        || header._len > sizeof(logrec_t)
-        || (lsn != lsn_t::null && lsn != *_lsn_ck()))
-    {
-        return false;
-    }
-    return true;
+    return header.is_valid() && (lsn == lsn_t::null || lsn == *_lsn_ck());
 }
 
 
@@ -618,6 +610,9 @@ chkpt_restore_tab_log::chkpt_restore_tab_log()
 
 void chkpt_restore_tab_log::redo(fixable_page_h*)
 {
+    // CS TODO: disabled for now
+    return;
+
     chkpt_restore_tab_t* tab = (chkpt_restore_tab_t*) _data;
 
     vol_t* vol = smlevel_0::vol;
@@ -692,6 +687,8 @@ restore_begin_log::restore_begin_log()
 
 void restore_begin_log::redo(fixable_page_h*)
 {
+    return; // CS TODO: disabled for now
+
     vol_t* volume = smlevel_0::vol;
     // volume must be mounted
     w_assert0(volume);
@@ -714,6 +711,8 @@ restore_end_log::restore_end_log()
 
 void restore_end_log::redo(fixable_page_h*)
 {
+    return; // CS TODO: disabled for now
+
     vol_t* volume = smlevel_0::vol;
     // volume must be mounted and failed
     w_assert0(volume && volume->is_failed());
@@ -741,6 +740,8 @@ restore_segment_log::restore_segment_log(uint32_t segment)
 
 void restore_segment_log::redo(fixable_page_h*)
 {
+    return; // CS TODO: disabled for now
+
     vol_t* volume = smlevel_0::vol;
     // volume must be mounted and failed
     w_assert0(volume && volume->is_failed());

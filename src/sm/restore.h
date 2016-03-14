@@ -119,7 +119,7 @@ public:
 
     virtual void run();
 
-    void shutdown();
+    bool try_shutdown();
 
 protected:
     // Two bitmaps are required for asynchronous writing: one to tell which
@@ -231,7 +231,7 @@ protected:
     }
 
     void unpin() {
-        lintel::unsafe::atomic_fetch_sub(&pinCount, -1);
+        lintel::unsafe::atomic_fetch_sub(&pinCount, 1);
     }
 
     /** \brief Method that executes the actual restore operations in a loop
@@ -326,7 +326,7 @@ public:
     virtual ~RestoreScheduler();
 
     void enqueue(const PageID& pid);
-    PageID next(bool peek = false);
+    bool next(PageID& next, bool peek = false);
     void setSinglePass(bool singlePass = true);
     bool hasWaitingRequest();
 
@@ -373,6 +373,10 @@ inline bool RestoreMgr::isRestored(const PageID& pid)
     }
 
     unsigned seg = getSegmentForPid(pid);
+    if (seg >= bitmap->getSize()) {
+        return true;
+    }
+
     return bitmap->get(seg);
 }
 

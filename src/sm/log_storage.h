@@ -58,19 +58,23 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 #define LOG_STORAGE_H
 #include "w_defines.h"
 
-#include "log.h"
+#include "sm_options.h"
 #include <partition.h>
 #include <map>
 #include <vector>
+#include <memory>
+#include <mutex>
+#include <condition_variable>
 
 typedef    smlevel_0::partition_number_t partition_number_t;
-typedef std::map<partition_number_t, partition_t*> partition_map_t;
+typedef std::map<partition_number_t, shared_ptr<partition_t>> partition_map_t;
 
 #define BOOST_FILESYSTEM_NO_DEPRECATED
 #include <boost/filesystem.hpp>
 namespace fs = boost::filesystem;
 
 class skip_log;
+class partition_recycler_t;
 
 class log_storage {
 
@@ -78,80 +82,58 @@ class log_storage {
 
     // use friend mechanism until better interface is implemented
     friend class partition_t;
+    friend class partition_recycler_t;
 
 public:
-    log_storage(const char* path, bool reformat, lsn_t& curr_lsn,
-        lsn_t& durable_lsn, lsn_t& flush_lsn, long segsize);
+    log_storage(const sm_options&);
     virtual ~log_storage();
 
-    partition_t*    get_partition_for_flush(lsn_t start_lsn,
+    shared_ptr<partition_t>    get_partition_for_flush(lsn_t start_lsn,
                             long start1, long end1, long start2, long end2);
-    partition_t*    find_partition(lsn_t&, bool existing, bool recovery, bool forward);
-    rc_t last_lsn_in_partition(partition_number_t pnum, lsn_t& lsn);
-    partition_t*    curr_partition() const;
-    long            prime(char* buf, lsn_t next, size_t block_size,
-                            bool read_whole_block = true);
-    void            acquire_partition_lock();
-    void            release_partition_lock();
+    shared_ptr<partition_t>    curr_partition() const;
 
-    partition_t *       get_partition(partition_number_t n) const;
-
-    static long         floor2(long offset, long block_size)
-                            { return offset & -block_size; }
-    static long         ceil2(long offset, long block_size)
-                           { return
-                               floor2(offset + block_size - 1, block_size); }
-
-
-    const char *        dir_name() { return _logdir; }
+    shared_ptr<partition_t>       get_partition(partition_number_t n) const;
 
     // used by partition_t
     skip_log*       get_skip_log()  { return _skip_log; }
 
-    fileoff_t           partition_data_size() const {
-                            return _partition_data_size; }
-
-    /**\brief used by partition */
-    fileoff_t limit() const { return _partition_size; }
+    fileoff_t get_partition_size() const { return _partition_size; }
 
     string make_log_name(partition_number_t pnum) const;
     fs::path make_log_path(partition_number_t pnum) const;
 
-    static long         _floor(long offset, long block_size)
-                            { return (offset/block_size)*block_size; }
-    static long         _ceil(long offset, long block_size)
-                            { return _floor(offset + block_size - 1, block_size); }
-
-    static fileoff_t          partition_size(long psize);
     static fileoff_t          min_partition_size();
     static fileoff_t          max_partition_size();
 
-private:
-    void                _prime(int fd, fileoff_t start, lsn_t next);
-    partition_t* create_partition(partition_number_t pnum);
+    void wakeup_recycler();
 
 private:
+    shared_ptr<partition_t> create_partition(partition_number_t pnum);
+
     fs::path        _logpath;
-    char*           _logdir;
-    long            _segsize;
     fileoff_t               _partition_size;
-    fileoff_t               _partition_data_size;
 
     partition_map_t _partitions;
-    partition_t* _curr_partition;
+    shared_ptr<partition_t> _curr_partition;
 
     skip_log*           _skip_log;
-    mutable queue_based_block_lock_t _partition_lock;
 
-    w_rc_t          _set_partition_size(fileoff_t psize);
+    unsigned _max_partitions;
 
-private:
     // forbid copy
     log_storage(const log_storage&);
     log_storage& operator=(const log_storage&);
 
+    unsigned delete_old_partitions(partition_number_t older_than = 0);
+    void try_delete(partition_number_t);
+
+    // Latch to protect access to partition map
+    mutable mcs_rwlock _partition_map_latch;
+
+    unique_ptr<partition_recycler_t> _recycler_thread;
+
 public:
-    enum { BLOCK_SIZE=partition_t::XFERSIZE };
+    enum { BLOCK_SIZE = partition_t::XFERSIZE };
     static const string log_prefix;
     static const string log_regex;
 };

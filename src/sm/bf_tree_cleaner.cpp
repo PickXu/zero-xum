@@ -9,7 +9,7 @@
 #include "bf_tree.h"
 #include "generic_page.h"
 #include "fixable_page_h.h"  // just for get_cb in bf_tree_inline.h
-#include "log.h"
+#include "log_core.h"
 #include "vol.h"
 #include <string.h>
 #include <vector>
@@ -130,13 +130,8 @@ w_rc_t bf_tree_cleaner::force_volume()
     int res = posix_memalign((void**) &buf, SM_PAGESIZE, SM_PAGESIZE);
     w_assert0(res == 0);
 
-    // Flush alloc_cache_t
-    PageID last_pid = smlevel_0::vol->get_last_allocated_pid();
-    for(PageID i=0; i<=last_pid; i+=alloc_cache_t::extent_size) {
-        lsn_t emlsn = smlevel_0::vol->get_alloc_cache()->get_page_lsn(i);
-        smlevel_0::vol->read_page_verify(i, buf, emlsn);
-        smlevel_0::vol->write_page(i, buf);
-    }
+    lsn_t dur_lsn = smlevel_0::log->durable_lsn();
+    W_DO(smlevel_0::vol->get_alloc_cache()->write_dirty_pages(dur_lsn));
 
     // Flush stnode_cache_t (always PID 1)
     lsn_t emlsn = smlevel_0::vol->get_stnode_cache()->get_page_lsn();
@@ -227,7 +222,6 @@ w_rc_t bf_tree_cleaner::_clean_volume(const std::vector<bf_idx> &candidates)
     DBG(<< "Cleaner activated with " << candidates.size() << " candidate frames");
     unsigned cleaned_count = 0;
 
-    // TODO this method should separate dirty pages that have dependency and flush them after others.
     if (_sort_buffer_size < candidates.size()) {
         size_t new_buffer_size = 2 * candidates.size();
         uint64_t* new_sort_buffer = new uint64_t[new_buffer_size];
@@ -240,6 +234,7 @@ w_rc_t bf_tree_cleaner::_clean_volume(const std::vector<bf_idx> &candidates)
     }
 
     // again, we don't take latch at this point because this sorting is just for efficiency.
+    // CS TODO: collect pid on list too, to avoid CB lookups here
     size_t sort_buf_used = 0;
     for (size_t i = 0; i < candidates.size(); ++i) {
         bf_idx idx = candidates[i];
@@ -338,12 +333,14 @@ w_rc_t bf_tree_cleaner::_clean_volume(const std::vector<bf_idx> &candidates)
             // also copy the new checksum to make the original (bufferpool) page consistent.
             // we can do this out of latch scope because it's never used in race condition.
             // this is mainly for testcases and such.
+            // // CS TODO delete this!
             page_buffer[idx].checksum = _write_buffer[write_buffer_cur].checksum;
             // DBGOUT3(<< "Checksum for " << _write_buffer[write_buffer_cur].pid
             //         << " is " << _write_buffer[write_buffer_cur].checksum);
 
 
             if (tobedeleted) {
+                // CS TODO: what's up with this stuff???
                 // as it's deleted, no one should be accessing it now. we can do everything without latch
                 DBGOUT2(<< "physically delete a page by buffer pool:" << page_buffer[idx].pid);
                 // this operation requires a xct for logging. we create a ssx for this reason.
@@ -371,7 +368,8 @@ w_rc_t bf_tree_cleaner::_clean_volume(const std::vector<bf_idx> &candidates)
                 prev_idx = idx;
                 prev_shpid = shpid;
             }
-        }
+        } // for i in 0 .. sort_buf_used
+
         if (skipped_something)
         {
             // CS: TODO instead of waiting forever, cleaner should have a
@@ -475,9 +473,6 @@ w_rc_t bf_tree_cleaner::_flush_write_buffer(size_t from, size_t consecutive, uns
 
             // cb._rec_lsn = _write_buffer[i].lsn.data();
             cb._rec_lsn = lsn_t::null.data();
-            cb._dependency_idx = 0;
-            cb._dependency_lsn = 0;
-            cb._dependency_shpid = 0;
         }
 
         cb.latch().latch_release();
@@ -515,19 +510,12 @@ w_rc_t bf_tree_cleaner::_do_work()
         // DBGOUT3(<< "Picked page for cleaning: idx = " << idx
         //         << " vol = " << cb._pid_vol
         //         << " shpid = " << cb._pid_shpid);
-
-        // also add dependent pages. note that this might cause a duplicate. we deal with duplicates in _clean_volume()
-        bf_idx didx = cb._dependency_idx;
-        if (didx != 0) {
-            bf_tree_cb_t &dcb = _bufferpool->get_cb(didx);
-            if (dcb._dirty && dcb._used && dcb._rec_lsn <= cb._dependency_lsn) {
-                _candidates_buffer.push_back (didx);
-            }
-        }
     }
     if (!_candidates_buffer.empty()) {
         W_DO(_clean_volume(_candidates_buffer));
     }
+
+    // CS TODO: invoke alloc_cache_t::write_dirty_pages to flush alloc pages
 
     _requested_volume = false;
     lintel::atomic_thread_fence(lintel::memory_order_release);

@@ -5,6 +5,7 @@
 
 #include "logarchiver.h"
 #include "sm_options.h"
+#include "log_core.h"
 
 #include <algorithm>
 #include <sm_base.h>
@@ -1544,6 +1545,10 @@ void LogArchiver::replacement()
                 DBGTHRD(<< "Replacement changed endLSN to " << control.endLSN);
             }
             return;
+        }
+
+        if (!lr->is_redo()) {
+            continue;
         }
 
         pushIntoHeap(lr, lr->is_multi_page());

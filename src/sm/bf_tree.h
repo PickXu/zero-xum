@@ -23,7 +23,6 @@ class test_bf_tree;
 class test_bf_fixed;
 class bf_tree_cleaner;
 class bf_tree_cleaner_slave_thread_t;
-class page_cleaner;
 class btree_page_h;
 struct EvictionContext;
 
@@ -355,16 +354,6 @@ public:
     bool is_used (bf_idx idx) const;
 
     /**
-     * Adds a write-order dependency such that one is always written out after another.
-     * @param[in] page the page to be written later. must be latched.
-     * @param[in] dependency the page to be written first. must be latched.
-     * @return whether the dependency is successfully registered. for a number of reasons,
-     * the dependency might be rejected. Thus, the caller must check the returned value
-     * and give up the logging optimization if rejected.
-     */
-    bool register_write_order_dependency(const generic_page* page, const generic_page* dependency);
-
-    /**
      * Whenever the parent of a page is changed (adoption or de-adoption),
      * this method must be called to switch it in bufferpool.
      * The caller must make sure the page itself, old and new parent pages
@@ -413,13 +402,6 @@ public:
       * Do NOT call this method without a latch.
       */
     PageID normalize_shpid(PageID shpid) const;
-
-    /** Immediately writes out all dirty pages in the given volume.*/
-    w_rc_t force_volume ();
-    /** Immediately writes out all dirty pages.*/
-    w_rc_t force_all ();
-    /** Wakes up all cleaner threads, starting them if not started yet. */
-    w_rc_t wakeup_cleaners ();
 
     /**
      * Dumps all contents of this bufferpool.
@@ -497,6 +479,8 @@ public:
     w_rc_t load_for_redo(bf_idx idx, PageID shpid);
 
     size_t get_size() { return _block_cnt; }
+
+    page_cleaner_base* get_cleaner() { return _cleaner; }
 
 private:
 
@@ -579,17 +563,6 @@ private:
      * Used from the dirty page cleaner to delete a page with "tobedeleted" flag.
      */
     void   _delete_block (bf_idx idx);
-
-    /**
-     * Returns if the dependency FROM cb is still active.
-     * If it turns out that the dependency is no longer active, it also clears _dependency_xxx to speed up future function call.
-     * cb must be pinned.
-     */
-    bool   _check_dependency_still_active (bf_tree_cb_t &cb);
-
-    bool   _check_dependency_cycle(bf_idx source, bf_idx start_idx);
-
-    bool   _compare_dependency_lsn(const bf_tree_cb_t& cb, const bf_tree_cb_t &dependency_cb) const;
 
     void   _swizzle_child_pointer(generic_page* parent, PageID* pointer_addr);
 
