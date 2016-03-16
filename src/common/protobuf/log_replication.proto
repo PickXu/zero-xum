@@ -1,7 +1,8 @@
 package replication;
 
 message Replication {
-	required int64 fileoffset = 1;
-        required int64 data_size = 2;
-        required bytes log_data = 3;
+        required int32 fileID = 1;
+	required int64 fileoffset = 2;
+        required int64 data_size = 3;
+        required bytes log_data = 4;
 }

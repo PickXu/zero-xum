@@ -62,7 +62,7 @@ public:
         virtual void run()
 	{
 		while(active) {
-			system(("rsync -avz --bwlimit="+bwlimit+" "+archdir+" xum@128.135.11.38:~/DB/zero-xum/build/src/cmd/archive").c_str());
+			system(("rsync -avz --bwlimit="+bwlimit+" "+archdir+" xum@128.135.11.38:~/DB/zero-xum/build/src/cmd").c_str());
 			::sleep(interval);
 		}
 	}
@@ -102,39 +102,40 @@ public:
 	    
 	    std::cout << "Enter subscriber ... " << std::endl;
 
-	    //NB: the log file name is hard code temporarily
-	    int curr_file = 1;
+            //NB: the log file name is hard code temporarily
+            int curr_file = 1;
             myfile.open (logdir+"/log."+std::to_string(curr_file),std::ios::in | std::ios::out);
-	    if (!myfile.is_open()){
-		myfile.open(logdir+"/log."+std::to_string(curr_file),std::ios::in | std::ios::out | std::ios::trunc);
-	    }
-
-	    while(active) {
-	            zmq::message_t logrec;
-
-	            _subscriber.recv(&logrec);
-
-		    replication::Replication rep;
-		    rep.ParseFromArray(logrec.data(),logrec.size());
-		    assert(rep.ByteSize() == logrec.size());
-
-		    int fileID = rep.fileID();
-		    int file_offset = rep.fileoffset();
-		    int data_size = rep.data_size();
-		    const string& data = rep.log_data();
-
-		    if (fileID != curr_file) {
-			curr_file = fileID;
-			myfile.close();
-			myfile.open (logdir+"/log."+std::to_string(curr_file),std::ios::in | std::ios::out);
-		        if (!myfile.is_open()){
-                	    myfile.open(logdir+"/log."+std::to_string(curr_file),std::ios::in | std::ios::out | std::ios::trunc);
-            		}
-		    }
-
-		    myfile.seekp(file_offset);
-	            myfile.write(data.c_str(),data_size);
+            if (!myfile.is_open()){
+                myfile.open(logdir+"/log."+std::to_string(curr_file),std::ios::in | std::ios::out | std::ios::trunc);
             }
+
+            while(active) {
+                    zmq::message_t logrec;
+
+                    _subscriber.recv(&logrec);
+
+                    replication::Replication rep;
+                    rep.ParseFromArray(logrec.data(),logrec.size());
+                    assert(rep.ByteSize() == logrec.size());
+
+                    int fileID = rep.fileid();
+                    int file_offset = rep.fileoffset();
+                    int data_size = rep.data_size();
+                    const string& data = rep.log_data();
+
+                    if (fileID != curr_file) {
+                        curr_file = fileID;
+                        myfile.close();
+                        myfile.open (logdir+"/log."+std::to_string(curr_file),std::ios::in | std::ios::out);
+                        if (!myfile.is_open()){
+                            myfile.open(logdir+"/log."+std::to_string(curr_file),std::ios::in | std::ios::out | std::ios::trunc);
+                        }
+                    }
+
+                    myfile.seekp(file_offset);
+                    myfile.write(data.c_str(),data_size);
+	    }
+	
 	    myfile.close();
     }
 
@@ -209,10 +210,11 @@ void Replica::loadOptions(sm_options& options, bool isPrimary)
 	options.set_string_option("sm_logdir", s_logdir);
 	options.set_string_option("sm_logport", "5557");
 	options.set_bool_option("sm_restart_instant", true);
-        options.set_bool_option("sm_archiving", true);
-	options.set_bool_option("sm_restore_instant", true);
-	options.set_bool_option("sm_restore_sched_singlepass", true);
-	options.set_bool_option("sm_restore_sched_ondemand", true);
+	//options.set_string_option("sm_archdir", archdir);
+        //options.set_bool_option("sm_archiving", true);
+	//options.set_bool_option("sm_restore_instant", true);
+	//options.set_bool_option("sm_restore_sched_singlepass", true);
+	//options.set_bool_option("sm_restore_sched_ondemand", true);
 	mkdirs(s_logdir);
     }
 
@@ -388,6 +390,7 @@ void Replica::runBenchmark(bool isPrimary)
 		p_shoreEnv->print_throughput(opt_queried_sf, true, 4, delay, miochs, usage);
 	} else {
 		// Set the volume as failed
+
 		vol_t* vol = smlevel_0::vol;
 		w_assert0(vol);
 		vol->mark_failed(false);
@@ -491,6 +494,13 @@ void Replica::run()
 
     _ps.bind("tcp://*:6667");
     _ps.bind("ipc://repl-control.ipc");
+    
+    // Start the log achive migration thread if archive is set
+    MigrateThread* mt;
+    if (!archdir.empty()){
+	    mt = new MigrateThread(archdir, "5000", 5);
+	    mt->fork();
+    }
 
     // Init the primary and publisher
     initPrimary();
@@ -503,12 +513,6 @@ void Replica::run()
     //CrashThread* t = new CrashThread(crashDelay);
     //t->fork();
 
-    // Start the log achive migration thread if archive is set
-    MigrateThread* mt;
-    if (!archdir.empty()){
-	    mt = new MigrateThread(archdir, "5000", 5);
-	    mt->fork();
-    }
 
     // Run the tpc-c benchmark
     runBenchmark(true);
