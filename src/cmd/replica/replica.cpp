@@ -199,20 +199,24 @@ void Replica::loadOptions(sm_options& options, bool isPrimary)
 	options.set_string_option("sm_logport","5556");
 	options.set_bool_option("sm_format",true);
 	mkdirs(p_logdir);
+#ifdef LOG_ARCHIVE_RECOVERY
 	if (!archdir.empty()) {
 		options.set_string_option("sm_archdir", archdir);
 	        options.set_bool_option("sm_archiver_eager", true);
 		options.set_bool_option("sm_archiving", true);
         	mkdirs(archdir);
     	}
+#endif
     } else {
     	options.set_string_option("sm_dbfile", s_dbfile);
 	options.set_string_option("sm_logdir", s_logdir);
 	options.set_string_option("sm_logport", "5557");
 	options.set_bool_option("sm_restart_instant", true);
+#ifdef LOG_ARCHIVE_RECOVERY
 	options.set_bool_option("sm_restore_instant", true);
 	options.set_bool_option("sm_restore_sched_singlepass", true);
 	options.set_bool_option("sm_restore_sched_ondemand",true);
+#endif
 	mkdirs(s_logdir);
     }
 
@@ -387,10 +391,12 @@ void Replica::runBenchmark(bool isPrimary)
 		TRACE(TRACE_ALWAYS, "[Primary] end measurement\n");
 		p_shoreEnv->print_throughput(opt_queried_sf, true, 4, delay, miochs, usage);
 	} else {
+#ifdef LOG_ARCHIVE_RECOVERY
 		// Set the volume as failed
 		vol_t* vol = smlevel_0::vol;
 		w_assert0(vol);
 		vol->mark_failed(false);
+#endif
 
 		s_shoreEnv->reset_stats();
 		stopwatch_t timer;
@@ -423,7 +429,7 @@ void Replica::archiveLog()
     smlevel_0::logArchiver->join();
 }
 
-void Replica::copyDevice()
+void Replica::copyDevice(string bwlimit)
 {
 /*
     // COPY LOCAL FILE
@@ -440,7 +446,7 @@ void Replica::copyDevice()
     target.close();
 */
 
-    system("rsync -avz xum@128.135.11.115:~/Documents/DB/zero/build/src/cmd/db sdb");
+    system(("rsync -avz --bwlimit="+bwlimit+" xum@128.135.11.115:~/Documents/DB/zero/build/src/cmd/db sdb").c_str());
     //tlog.close();
         
 }
@@ -494,12 +500,14 @@ void Replica::run()
     _ps.bind("tcp://*:6667");
     _ps.bind("ipc://repl-control.ipc");
     
+#ifdef LOG_ARCHIVE_RECOVERY
     // Start the log achive migration thread if archive is set
     MigrateThread* mt;
     if (!archdir.empty()){
-	    mt = new MigrateThread(archdir, "5000", 5);
+	    mt = new MigrateThread(archdir, "50000", 5);
 	    mt->fork();
     }
+#endif
 
     // Init the primary and publisher
     initPrimary();
@@ -522,7 +530,9 @@ void Replica::run()
     zmq::message_t ctrl_msg((void*)msg_content.data(),13, NULL);
     _ps.send(ctrl_msg);
 
+#ifdef LOG_ARCHIVE_RECOVERY
     if (mt) mt->stop();
+#endif
    
     } else {
     string host("128.135.11.115");
@@ -549,7 +559,7 @@ void Replica::run()
 
     // Copy Device File to Replica
     stopwatch_t timer;
-    copyDevice();
+    copyDevice("10000");
     double delay = timer.time();
     cout << "Copy DB Latency: " << delay << endl;
     

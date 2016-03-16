@@ -27,7 +27,7 @@ protected:
 	void ensureParentPathExists(string);
 	void ensureEmptyPath(string);
 	void archiveLog();
-	void copyDevice();
+	void copyDevice(string);
 private:
 	int duration;
 	int crashDelay;
