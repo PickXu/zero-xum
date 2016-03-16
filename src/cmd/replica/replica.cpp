@@ -38,9 +38,16 @@ public:
     {
         ::sleep(delay);
         cerr << "Crash thread will now abort program" << endl;
-        abort();
-    }
 
+	// Notify the secondaries about the crash
+	//string msg_content("CTRL-MSG: FIN");
+        //zmq::message_t ctrl_msg((void*)msg_content.data(),13, NULL);
+        //_ps.send(ctrl_msg);
+
+	//::sleep(1);
+
+	abort();
+    }
 private:
     unsigned delay;
 };
@@ -48,9 +55,9 @@ private:
 class MigrateThread : public smthread_t
 {
 public:
-	MigrateThread(string archdir, string bwlimit, int interval)
+	MigrateThread(string path, string bwlimit, int interval)
 			: smthread_t(t_regular, "MigrateThread"),
-			archdir(archdir),
+			path(path),
 			bwlimit(bwlimit),
 			interval(interval),
 			active(true)
@@ -62,7 +69,7 @@ public:
         virtual void run()
 	{
 		while(active) {
-			system(("rsync -avz --bwlimit="+bwlimit+" "+archdir+" xum@128.135.11.38:~/DB/zero-xum/build/src/cmd").c_str());
+			system(("rsync -avz --bwlimit="+bwlimit+" xum@128.135.11.115:~/Documents/DB/zero/build/src/cmd/"+path+" "+path).c_str());
 			::sleep(interval);
 		}
 	}
@@ -72,7 +79,7 @@ public:
 		active = false;
 	}
 private:
-	string archdir;
+	string path;
 	string bwlimit;
 	int interval;	
 	bool active;
@@ -544,6 +551,11 @@ void Replica::run()
     Subscriber* sub = new Subscriber(s_logdir,host,port1);
     sub->fork();
 
+    // Start the dbfile migration thread
+    MigrateThread* mt = new MigrateThread("db", "5000", 5);
+    mt->fork();
+
+
     zmq::context_t _context (1);
     zmq::socket_t _ss (_context, ZMQ_SUB);
 
@@ -556,9 +568,11 @@ void Replica::run()
     } while(strncmp((const char *)_ctrl_msg.data(), "CTRL-MSG: FIN",13) != 0);
 
     sub->stop();
+    mt->stop();
 
     // Copy Device File to Replica
     stopwatch_t timer;
+    //Make sure the two dbfiles are identical
     copyDevice("10000");
     double delay = timer.time();
     cout << "Copy DB Latency: " << delay << endl;
