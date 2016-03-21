@@ -3,6 +3,9 @@
 
 #include "command.h"
 #include "../kits/shore_client.h"
+#include <zmq.hpp>
+
+//#define LOG_ARCHIVE_RECOVERY
 
 class ShoreEnv;
 
@@ -28,6 +31,7 @@ protected:
 	void ensureEmptyPath(string);
 	void archiveLog();
 	void copyDevice(string);
+
 private:
 	int duration;
 	int crashDelay;

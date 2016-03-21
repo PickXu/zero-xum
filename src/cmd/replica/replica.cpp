@@ -9,7 +9,6 @@
 #include <boost/filesystem.hpp>
 namespace fs = boost::filesystem;
 
-#include <zmq.hpp>
 #include <fstream>
 #include <iostream>
 
@@ -20,7 +19,7 @@ namespace fs = boost::filesystem;
 #define EnvironmentPtr dynamic_cast<tpcc::ShoreTPCCEnv*>
 //#define HAVE_CPUMON
 
-int opt_queried_sf = 1;
+int opt_queried_sf = 4;
 
 //procmonitor_t* _g_mon = ;
 class CrashThread : public smthread_t
@@ -28,7 +27,7 @@ class CrashThread : public smthread_t
 public:
     CrashThread(unsigned delay)
         : smthread_t(t_regular, "CrashThread"),
-        delay(delay)
+          delay(delay)
     {
     }
 
@@ -36,20 +35,54 @@ public:
 
     virtual void run()
     {
+
         ::sleep(delay);
         cerr << "Crash thread will now abort program" << endl;
 
-	// Notify the secondaries about the crash
-	//string msg_content("CTRL-MSG: FIN");
-        //zmq::message_t ctrl_msg((void*)msg_content.data(),13, NULL);
-        //_ps.send(ctrl_msg);
-
-	//::sleep(1);
 
 	abort();
     }
 private:
     unsigned delay;
+};
+
+class HeartBeatThread : public smthread_t 
+{
+public:
+	HeartBeatThread()
+		: smthread_t(t_regular, "HeartBeatThread"),
+		active(true)
+	{
+	}
+
+	virtual ~HeartBeatThread() {}
+
+	virtual void run()
+	{
+		zmq::context_t context (1);
+                zmq::socket_t socket (context, ZMQ_REP);
+	        socket.bind ("tcp://*:6667");
+		
+		while (active) {
+     		   	zmq::message_t request;
+
+        		//  Wait for next request from client
+        		socket.recv (&request);
+        		cout << "SECONDARY-HEARTBEAT" << endl;
+
+        		//  Send reply back to client
+        		zmq::message_t reply (11);
+        		memcpy (reply.data (), "PRIMARY-ACK", 11);
+        		socket.send (reply);
+    		}
+	}
+
+        virtual void stop()
+	{
+		active = false;
+	}
+private:
+	bool active;
 };
 
 class MigrateThread : public smthread_t
@@ -494,7 +527,6 @@ int getPrimary()
 
     return pid;
 }
-	
 
 void Replica::run()
 {
@@ -502,11 +534,12 @@ void Replica::run()
     optionValues.insert(std::make_pair("threads", po::variable_value(4,false)));
 
     if (isPrimary) {
-    zmq::context_t _context (1);
-    zmq::socket_t _ps (_context, ZMQ_PUB);
+    //int linger=0;
+    //_ps.setsockopt(ZMQ_LINGER,&linger,sizeof(int));
 
-    _ps.bind("tcp://*:6667");
-    _ps.bind("ipc://repl-control.ipc");
+    // Start primary heartbeat thread
+    HeartBeatThread* hbt = new HeartBeatThread();
+    hbt->fork();
     
 #ifdef LOG_ARCHIVE_RECOVERY
     // Start the log achive migration thread if archive is set
@@ -528,24 +561,21 @@ void Replica::run()
     //CrashThread* t = new CrashThread(crashDelay);
     //t->fork();
 
-
     // Run the tpc-c benchmark
     runBenchmark(true);
 
     finishPrimary();
-
-    string msg_content("CTRL-MSG: FIN");
-    zmq::message_t ctrl_msg((void*)msg_content.data(),13, NULL);
-    _ps.send(ctrl_msg);
-
+    
 #ifdef LOG_ARCHIVE_RECOVERY
     if (mt) mt->stop();
 #endif
+    hbt->stop();
    
     } else {
     string host("128.135.11.115");
     string port1("5556");	// Port for log replication
     string port2("6667");	// Port for out-of-band control
+    bool active = true;
 
     // Start the subscriber to receive log records
     // from the primary
@@ -556,18 +586,35 @@ void Replica::run()
     //MigrateThread* mt = new MigrateThread("db", "10000", 10);
     //mt->fork();
 
+    zmq::context_t context (1);
+    zmq::socket_t socket (context, ZMQ_REQ);
+    std::cout << "Connecting to primary…" << std::endl;
+    socket.connect (("tcp://"+host+":"+port2).c_str());
 
-    zmq::context_t _context (1);
-    zmq::socket_t _ss (_context, ZMQ_SUB);
+    zmq::pollitem_t item = {socket, 0, ZMQ_POLLIN, 0};
+    zmq::message_t request (19);
+    memcpy (request.data (), "SECONDARY-HEARTBEAT", 19);
 
-    _ss.connect(("tcp://"+host+":"+port2).c_str());
-    _ss.setsockopt(ZMQ_SUBSCRIBE, "",0);    
+    //  send heartbeat requests every 5 second
+    while(active) {
+	::sleep(5);
+	cout << "Sending heartbeat …" << endl;
 
-    zmq::message_t _ctrl_msg;
-    do {
-        _ss.recv(&_ctrl_msg);
-        cout << "Hehe" << endl;
-    } while(strncmp((const char *)_ctrl_msg.data(), "CTRL-MSG: FIN",13) != 0);
+	socket.send (request);
+
+        zmq::message_t reply;
+	// Wait for ACK with 10 seconds timeout
+	zmq::poll(&item,1,10000000);
+        //  Get the reply.
+	cout << item.revents << endl;
+	if (item.revents & ZMQ_POLLIN) {
+        	socket.recv (&reply);
+        	cout << "Received ACK from Primary" << endl;
+        } else {
+		// Timeout exception
+		active = false;
+	}
+    }
 
     sub->stop();
     //mt->stop();
