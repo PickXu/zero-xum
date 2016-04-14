@@ -871,6 +871,7 @@ int ShoreEnv::start_sm()
         // system state. Mount here is only necessary if we explicitly dismount
         // after loading, which is not the case.
 
+
         // Make sure that catalog index (stid 1) exists
         vol_t* vol = ss_m::vol;
         w_assert0(vol);

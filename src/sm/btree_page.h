@@ -632,6 +632,8 @@ inline PageID& btree_page_data::item_child(int item) {
 
 
 inline char* btree_page_data::item_data(int item) {
+    if (item < 0 || item >= nitems)
+        cout << "Item " << item << " out of " << nitems << endl;
     w_assert1(item>=0 && item<nitems);
     body_offset_t offset = head[item].offset;
     if (offset < 0) {

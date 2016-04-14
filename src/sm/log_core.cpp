@@ -1424,6 +1424,7 @@ lsn_t log_core::flush_daemon_work(lsn_t old_mark)
 
     long written = (end2 - start2) + (end1 - start1);
     p->set_size(start_lsn.lo()+written);
+    ::usleep(1000);
 
 #ifdef LOG_REPLICATION
     //xum: replicate the flushed log records to subscribers
@@ -1483,6 +1484,7 @@ lsn_t log_core::flush_daemon_work(lsn_t old_mark)
 	    rep.set_fileoffset(file_offset);
 	    rep.set_data_size(end1-start1+end2-start2+s->length()+grand_total-total);
 	    rep.set_log_data(msg,pos);
+	    rep.set_checksum(0);
 	
 	    // Serialize and Send out the message
 	    zmq::message_t message(rep.ByteSize());

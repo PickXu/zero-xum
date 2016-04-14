@@ -11,6 +11,7 @@ namespace fs = boost::filesystem;
 
 #include <fstream>
 #include <iostream>
+#include <boost/crc.hpp>
 
 #include "protobuf/log_replication.pb.h"
 
@@ -46,6 +47,39 @@ private:
     unsigned delay;
 };
 
+class StatThread : public smthread_t
+{
+public:
+	StatThread(ShoreEnv* shoreEnv)
+		: smthread_t(t_regular, "StatThread"),
+		shoreEnv(shoreEnv),
+		active(true)
+        {
+	}
+	virtual ~StatThread() {}
+
+ 	virtual void run()
+	{
+
+		long delay = 0;
+		while(active) {
+			::sleep(1);
+			delay++;
+			shoreEnv->print_throughput(opt_queried_sf, true, 4, delay, 0, 0);			
+		}
+		
+	}
+
+	virtual void stop()
+	{
+		active = false;
+	}
+
+private:
+	ShoreEnv* shoreEnv;
+	bool active;
+};
+
 class HeartBeatThread : public smthread_t 
 {
 public:
@@ -60,7 +94,7 @@ public:
 	virtual void run()
 	{
 		zmq::context_t context (1);
-                zmq::socket_t socket (context, ZMQ_REP);
+                zmq::socket_t socket (context, ZMQ_SUB);
 	        socket.bind ("tcp://*:6667");
 		
 		while (active) {
@@ -133,12 +167,15 @@ public:
     virtual ~Subscriber() {}
     virtual void run()
     {
-	    zmq::context_t _context (1);
-	    zmq::socket_t _subscriber (_context, ZMQ_SUB);
+	    void* _context = zmq_init(1);
+	    void* _subscriber = zmq_socket(_context, ZMQ_REP);
 	    std::fstream myfile;
 
-	    _subscriber.connect(("tcp://"+host+":"+port).c_str());
-	    _subscriber.setsockopt(ZMQ_SUBSCRIBE, "",0);
+	    zmq_connect(_subscriber,("tcp://"+host+":"+port).c_str());
+	    //int bufsize = 1<<30;
+	    //zmq_setsockopt(_subscriber,ZMQ_RCVBUF,&bufsize,sizeof(int));
+	    //zmq_setsockopt(_subscriber,ZMQ_SUBSCRIBE, "",0);
+    	    zmq_pollitem_t item = {_subscriber, 0, ZMQ_POLLIN, 0};
 	    
 	    std::cout << "Enter subscriber ... " << std::endl;
 
@@ -150,19 +187,35 @@ public:
             }
 
             while(active) {
-                    zmq::message_t logrec;
+                    zmq_msg_t logrec;
+		    zmq_msg_init(&logrec);
+	   	    zmq_poll(&item,1,1000);
 
-                    _subscriber.recv(&logrec);
+		    if (item.revents & ZMQ_POLLIN) {
+                     	zmq_recv(_subscriber,&logrec,0);
+	            } else {
+			continue;
+		    }
 
                     replication::Replication rep;
-                    rep.ParseFromArray(logrec.data(),logrec.size());
-                    assert(rep.ByteSize() == logrec.size());
+                    rep.ParseFromArray(zmq_msg_data(&logrec),zmq_msg_size(&logrec));
+                    assert(rep.ByteSize() == zmq_msg_size(&logrec));
 
                     int fileID = rep.fileid();
-                    int file_offset = rep.fileoffset();
-                    int data_size = rep.data_size();
+                    int64_t file_offset = rep.fileoffset();
+                    int64_t data_size = rep.data_size();
                     const string& data = rep.log_data();
+ 		    int64_t checksum = rep.checksum();
 
+		    //integrity checking
+		    rep.set_checksum(0);
+		    boost::crc_optimal<64,0x1021> crc64;
+		    crc64.process_bytes(&fileID,4);
+		    crc64.process_bytes(&file_offset,8);
+		    crc64.process_bytes(&data_size,8);
+		    crc64.process_bytes(data.data(),data.size());
+		    
+		    if (checksum == crc64.checksum()) {
                     if (fileID != curr_file) {
                         curr_file = fileID;
                         myfile.close();
@@ -173,7 +226,17 @@ public:
                     }
 
                     myfile.seekp(file_offset);
-                    myfile.write(data.c_str(),data_size);
+                    myfile.write(data.data(),data_size);
+		    zmq_msg_t ack;
+		    zmq_msg_init_size(&ack, 13);
+		    memcpy(zmq_msg_data(&ack),"SECONDARY-ACK",13);
+		    zmq_send(_subscriber,&ack,0);
+		    } else {
+			zmq_msg_t ack;
+	                zmq_msg_init_size(&ack, 13);
+        	        memcpy(zmq_msg_data(&ack),"SECONDARY-ERR",13);
+                	zmq_send(_subscriber,&ack,0);
+		   }
 	    }
 	
 	    myfile.close();
@@ -251,7 +314,7 @@ void Replica::loadOptions(sm_options& options, bool isPrimary)
     	options.set_string_option("sm_dbfile", s_dbfile);
 	options.set_string_option("sm_logdir", s_logdir);
 	options.set_string_option("sm_logport", "5557");
-	options.set_bool_option("sm_restart_instant", true);
+	//options.set_bool_option("sm_restart_instant", opt_inst);
 #ifdef LOG_ARCHIVE_RECOVERY
 	options.set_bool_option("sm_restore_instant", true);
 	options.set_bool_option("sm_restore_sched_singlepass", true);
@@ -440,6 +503,9 @@ void Replica::runBenchmark(bool isPrimary)
 #endif
 
 		s_shoreEnv->reset_stats();
+		//StatThread* stt = new StatThread(s_shoreEnv);
+		//stt->fork();
+
 		stopwatch_t timer;
 		TRACE(TRACE_ALWAYS, "[Secondary] begin measurement\n");
 		createClients(isPrimary);
@@ -456,6 +522,7 @@ void Replica::runBenchmark(bool isPrimary)
 #endif
 		TRACE(TRACE_ALWAYS, "[Secondary] end measurement\n");
 		s_shoreEnv->print_throughput(opt_queried_sf, true, 4, delay, miochs, usage);
+		//stt->stop();
 	}
 }
 
@@ -488,6 +555,7 @@ void Replica::copyDevice(string bwlimit)
 */
 
     system(("rsync -avz --bwlimit="+bwlimit+" xum@128.135.11.115:~/Documents/DB/zero/build/src/cmd/db db").c_str());
+    system(("rsync -avz --bwlimit="+bwlimit+" xum@128.135.11.115:~/Documents/DB/zero/build/src/cmd/log/* log_replica/").c_str());
     //tlog.close();
         
 }

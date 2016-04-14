@@ -180,6 +180,7 @@ restart_m::redo_log_pass()
     lsn_t lsn;
     lsn_t expected_lsn = redo_lsn;
     bool redone = false;
+    int cnt1=0,cnt2=0;
     while (scan.xct_next(lsn, r))
     {
         if ((lsn > end_logscan_lsn))
@@ -237,6 +238,7 @@ restart_m::redo_log_pass()
                         {
                             DBGOUT3(<<"redo - no page, xct is " << r.tid());
                             r.redo(0);
+			    cnt1++;
 
                             // No page involved, no need to update dirty_count
                             redone = true;
@@ -292,10 +294,12 @@ restart_m::redo_log_pass()
                 // aborted transaction (aborted txn are not kept in transaction table).
 
                 _redo_log_with_pid(r, r.pid(), redone, dirty_count);
+		cnt2++;
                 if (r.is_multi_page())
                 {
                     w_assert1(r.is_single_sys_xct());
                     _redo_log_with_pid(r, r.pid2(), redone, dirty_count);
+		    cnt2++;
                 }
             }
         }
@@ -327,6 +331,7 @@ restart_m::redo_log_pass()
 
     ADD_TSTAT(restart_redo_time, timer.time_us());
     sysevent::log(logrec_t::t_redo_done);
+    cout << "Redo logs: " << cnt1 << "; Redo pages: " << cnt2 << endl;
 }
 
 /*********************************************************************
