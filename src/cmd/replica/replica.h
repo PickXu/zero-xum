@@ -5,6 +5,7 @@
 #include "../kits/shore_client.h"
 #include <zmq.hpp>
 
+//#define LOG_ARCHIVE_RECOVERY
 
 class ShoreEnv;
 

@@ -112,10 +112,17 @@ class Replication : public ::google::protobuf::Message {
   inline ::google::protobuf::int64 data_size() const;
   inline void set_data_size(::google::protobuf::int64 value);
 
-  // required bytes log_data = 4;
+  // required int64 checksum = 4;
+  inline bool has_checksum() const;
+  inline void clear_checksum();
+  static const int kChecksumFieldNumber = 4;
+  inline ::google::protobuf::int64 checksum() const;
+  inline void set_checksum(::google::protobuf::int64 value);
+
+  // required bytes log_data = 5;
   inline bool has_log_data() const;
   inline void clear_log_data();
-  static const int kLogDataFieldNumber = 4;
+  static const int kLogDataFieldNumber = 5;
   inline const ::std::string& log_data() const;
   inline void set_log_data(const ::std::string& value);
   inline void set_log_data(const char* value);
@@ -132,6 +139,8 @@ class Replication : public ::google::protobuf::Message {
   inline void clear_has_fileoffset();
   inline void set_has_data_size();
   inline void clear_has_data_size();
+  inline void set_has_checksum();
+  inline void clear_has_checksum();
   inline void set_has_log_data();
   inline void clear_has_log_data();
 
@@ -139,11 +148,12 @@ class Replication : public ::google::protobuf::Message {
 
   ::google::protobuf::int64 fileoffset_;
   ::google::protobuf::int64 data_size_;
+  ::google::protobuf::int64 checksum_;
   ::std::string* log_data_;
   ::google::protobuf::int32 fileid_;
 
   mutable int _cached_size_;
-  ::google::protobuf::uint32 _has_bits_[(4 + 31) / 32];
+  ::google::protobuf::uint32 _has_bits_[(5 + 31) / 32];
 
   friend void  protobuf_AddDesc_log_5freplication_2eproto();
   friend void protobuf_AssignDesc_log_5freplication_2eproto();
@@ -225,15 +235,37 @@ inline void Replication::set_data_size(::google::protobuf::int64 value) {
   data_size_ = value;
 }
 
-// required bytes log_data = 4;
-inline bool Replication::has_log_data() const {
+// required int64 checksum = 4;
+inline bool Replication::has_checksum() const {
   return (_has_bits_[0] & 0x00000008u) != 0;
 }
-inline void Replication::set_has_log_data() {
+inline void Replication::set_has_checksum() {
   _has_bits_[0] |= 0x00000008u;
 }
-inline void Replication::clear_has_log_data() {
+inline void Replication::clear_has_checksum() {
   _has_bits_[0] &= ~0x00000008u;
+}
+inline void Replication::clear_checksum() {
+  checksum_ = GOOGLE_LONGLONG(0);
+  clear_has_checksum();
+}
+inline ::google::protobuf::int64 Replication::checksum() const {
+  return checksum_;
+}
+inline void Replication::set_checksum(::google::protobuf::int64 value) {
+  set_has_checksum();
+  checksum_ = value;
+}
+
+// required bytes log_data = 5;
+inline bool Replication::has_log_data() const {
+  return (_has_bits_[0] & 0x00000010u) != 0;
+}
+inline void Replication::set_has_log_data() {
+  _has_bits_[0] |= 0x00000010u;
+}
+inline void Replication::clear_has_log_data() {
+  _has_bits_[0] &= ~0x00000010u;
 }
 inline void Replication::clear_log_data() {
   if (log_data_ != &::google::protobuf::internal::kEmptyString) {

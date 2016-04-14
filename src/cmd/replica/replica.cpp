@@ -19,7 +19,7 @@ namespace fs = boost::filesystem;
 #define EnvironmentPtr dynamic_cast<tpcc::ShoreTPCCEnv*>
 //#define HAVE_CPUMON
 
-int opt_queried_sf = 1;
+int opt_queried_sf = 4;
 
 //procmonitor_t* _g_mon = ;
 class CrashThread : public smthread_t
@@ -314,6 +314,18 @@ void Replica::initPrimary()
 	p_shoreEnv->set_device(opt_dbfile);
 
 	p_shoreEnv->start();
+
+	//flush dirty pages
+	ERROUT(<< "ShoreEnv Flushing Dirty Pages");
+
+        W_COERCE(smlevel_0::bf->force_volume());
+        W_COERCE(smlevel_0::log->flush_all());
+        me()->check_actual_pin_count(0);
+
+        // Take a synch checkpoint (blocking) after buffer pool flush but before shutting down
+	//smlevel_0::chkpt->take();
+        ERROUT(<< "ShoreEnv: Loading Flushed");
+
 }
 
 void Replica::finishPrimary()
@@ -486,7 +498,7 @@ void Replica::copyDevice(string bwlimit)
     target.close();
 */
 
-    system(("rsync -avz --bwlimit="+bwlimit+" xum@128.135.11.115:~/Documents/DB/zero/build/src/cmd/db sdb").c_str());
+    system(("rsync -avz --bwlimit="+bwlimit+" db xum@128.135.11.38:~/DB/zero-xum/build/src/cmd/db").c_str());
     //tlog.close();
         
 }
@@ -527,20 +539,7 @@ int getPrimary()
     return pid;
 }
 
-void signalHandler(int signum)
-{
-	cout << "Interrupt signal (" << signum << ") received.\n";
-	zmq::context_t _context(1);
-	zmq::socket_t _ps(_context, ZMQ_PUB);
-        _ps.bind("tcp://*:6667");
-        _ps.bind("ipc://repl-control.ipc");
 
-	string msg_content("CTRL-MSG: FIN");
-        zmq::message_t ctrl_msg((void*)msg_content.data(),13, NULL);
-        _ps.send(ctrl_msg);
-
-	return;
-}
 
 void Replica::run()
 {
@@ -605,9 +604,7 @@ void Replica::run()
     std::cout << "Connecting to primary…" << std::endl;
     socket.connect (("tcp://"+host+":"+port2).c_str());
 
-    zmq_pollitem_t item;
-    item.socket = socket;
-    item.events = ZMQ_POLLIN;
+    zmq::pollitem_t item = {socket,0,ZMQ_POLLIN,0};
     zmq::message_t request (19);
     memcpy (request.data (), "SECONDARY-HEARTBEAT", 19);
 

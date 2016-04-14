@@ -4,5 +4,6 @@ message Replication {
         required int32 fileID = 1;
 	required int64 fileoffset = 2;
         required int64 data_size = 3;
-        required bytes log_data = 4;
+	required int64 checksum = 4;
+        required bytes log_data = 5;
 }
