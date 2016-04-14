@@ -81,6 +81,9 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 #include <w_strstream.h>
 #include <sys/stat.h>
 
+//xum
+#include <boost/crc.hpp>
+
 typedef smlevel_0::fileoff_t fileoff_t;
 
 const std::string log_core::IMPL_NAME = "traditional";
@@ -163,8 +166,6 @@ public:
 
 log_common::log_common(const sm_options& options)
     :
-      _context(1),
-      _publisher(_context,ZMQ_PUB),
       _log_corruption(false),
       _readbuf(NULL),
 #ifdef LOG_DIRECT_IO
@@ -177,6 +178,8 @@ log_common::log_common(const sm_options& options)
       _shutting_down(false),
       _flush_daemon_running(false)
 {
+    _context = zmq_init(1);
+    _publisher = zmq_socket(_context,ZMQ_REQ);
     FUNC(log_common::log_common);
     set_option_logsize(options);
 
@@ -596,8 +599,15 @@ log_core::log_core(const sm_options& options)
 
     string log_port = options.get_string_option("sm_logport","5556");
     cout << "LOG PORT: " << log_port << endl;
-    _publisher.bind(("tcp://*:"+log_port).c_str());
-    _publisher.bind("ipc://replication.ipc");
+    //int hwm = 1;
+    //zmq_setsockopt(_publisher,ZMQ_HWM,&hwm,sizeof(int));
+    //int bufsize = 8192;
+    //zmq_setsockopt(_publisher,ZMQ_SNDBUF,&bufsize,sizeof(int));
+    zmq_bind(_publisher,("tcp://*:"+log_port).c_str());
+    //zmq_bind(_publisher,"ipc://replication.ipc");
+
+    //int sndbuf = 8192;
+    //_publisher.setsockopt(ZMQ_SNDBUF,&sndbuf,sizeof(int));
 
 #ifdef LOG_DIRECT_IO
     posix_memalign((void**)&_buf, LOG_DIO_ALIGN, _segsize);
@@ -1432,7 +1442,7 @@ lsn_t log_core::flush_daemon_work(lsn_t old_mark)
 	    long size = (end2 - start2) + (end1 - start1);
 	    long write_size = size;
 
-	    long file_offset = log_storage::floor2(start_lsn.lo(), log_storage::BLOCK_SIZE);
+	    int64_t file_offset = log_storage::floor2(start_lsn.lo(), log_storage::BLOCK_SIZE);
             // offset is rounded down to a block_size
 	    long delta = start_lsn.lo() - file_offset;
 
@@ -1484,12 +1494,31 @@ lsn_t log_core::flush_daemon_work(lsn_t old_mark)
 	    rep.set_fileoffset(file_offset);
 	    rep.set_data_size(end1-start1+end2-start2+s->length()+grand_total-total);
 	    rep.set_log_data(msg,pos);
-	    rep.set_checksum(0);
+
+	    //compute CRC64
+	    int32_t fileid = start_lsn.file();
+	    int64_t logsize = end1-start1+end2-start2+s->length()+grand_total-total;
+	    boost::crc_optimal<64,0x1021> crc64;
+	    crc64.process_bytes(&fileid,4);
+	    crc64.process_bytes(&file_offset,8);
+	    crc64.process_bytes(&logsize,8);
+	    crc64.process_bytes(msg,pos);
+	    rep.set_checksum(crc64.checksum());
+	    
 	
 	    // Serialize and Send out the message
-	    zmq::message_t message(rep.ByteSize());
-	    rep.SerializeToArray(message.data(),rep.ByteSize());
-	    _publisher.send(message);
+	    //zmq::message_t message(rep.ByteSize());
+	    zmq_msg_t message;
+	    zmq_msg_init_size (&message, rep.ByteSize());
+	    rep.SerializeToArray(zmq_msg_data(&message),rep.ByteSize());
+	    zmq_msg_t reply;
+	    zmq_msg_init_size(&reply,13);
+
+	    //cout << "Size: " << rep.ByteSize() << " Checksum: " << crc64.checksum() << endl;
+	    do {
+	    	zmq_send(_publisher, &message, 0);
+	    	zmq_recv(_publisher,&reply,0);
+	    } while (memcmp(zmq_msg_data(&reply),"SECONDARY-ACK",13) != 0);
 
 
 	    delete [] msg;

@@ -377,6 +377,18 @@ void Replica::initPrimary()
 	p_shoreEnv->set_device(opt_dbfile);
 
 	p_shoreEnv->start();
+
+	//flush dirty pages
+	ERROUT(<< "ShoreEnv Flushing Dirty Pages");
+
+        W_COERCE(smlevel_0::bf->force_volume());
+        W_COERCE(smlevel_0::log->flush_all());
+        me()->check_actual_pin_count(0);
+
+        // Take a synch checkpoint (blocking) after buffer pool flush but before shutting down
+	//smlevel_0::chkpt->take();
+        ERROUT(<< "ShoreEnv: Loading Flushed");
+
 }
 
 void Replica::finishPrimary()
