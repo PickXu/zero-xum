@@ -19,6 +19,8 @@
 class sm_options;
 class LogScanner;
 
+typedef int32_t run_number_t;
+
 /** \brief Object to control execution of background threads.
  *
  * Encapsulates an activation loop that relies on pthread condition variables.
@@ -219,8 +221,8 @@ public:
         virtual ~ArchiveIndex();
 
         struct ProbeResult {
-            lpid_t pidBegin;
-            lpid_t pidEnd;
+            PageID pidBegin;
+            PageID pidEnd;
             lsn_t runBegin;
             lsn_t runEnd;
             size_t offset;
@@ -229,16 +231,16 @@ public:
 
         void init();
 
-        void newBlock(lpid_t firstPID);
-        void newBlock(const vector<pair<lpid_t, size_t> >& buckets);
+        void newBlock(PageID firstPID);
+        void newBlock(const vector<pair<PageID, size_t> >& buckets);
 
         rc_t finishRun(lsn_t first, lsn_t last, int fd, fileoff_t);
         void probe(std::vector<ProbeResult>& probes,
-                lpid_t startPID, lpid_t endPID, lsn_t startLSN);
+                PageID startPID, PageID endPID, lsn_t startLSN);
 
         rc_t getBlockCounts(int fd, size_t* indexBlocks, size_t* dataBlocks);
         rc_t loadRunInfo(const char* fname);
-        void appendNewEntry(/*lpid_t lastPID*/);
+        void appendNewEntry(/*PageID lastPID*/);
 
         void setLastFinished(int f) { lastFinished = f; }
         size_t getBucketSize() { return bucketSize; }
@@ -248,11 +250,11 @@ public:
     private:
         struct BlockEntry {
             size_t offset;
-            lpid_t pid;
+            PageID pid;
         };
         struct BlockHeader {
             uint32_t entries;
-            uint8_t blockNumber;
+            uint32_t blockNumber;
         };
         struct RunInfo {
             lsn_t firstLSN;
@@ -265,7 +267,7 @@ public:
             lsn_t lastLSN;
 
             // Simple min-max filter for page IDs (min is in 1st entry)
-            lpid_t lastPID;
+            PageID lastPID;
 
             std::vector<BlockEntry> entries;
 
@@ -295,7 +297,7 @@ public:
         size_t findRun(lsn_t lsn);
         void probeInRun(ProbeResult&);
         // binary search
-        size_t findEntry(RunInfo* run, lpid_t pid,
+        size_t findEntry(RunInfo* run, PageID pid,
                 int from = -1, int to = -1);
         rc_t serializeRunInfo(RunInfo&, int fd, fileoff_t);
         rc_t deserializeRunInfo(RunInfo&, const char* fname);
@@ -385,8 +387,8 @@ public:
     class WriterThread : public BaseThread {
     private:
         ArchiveDirectory* directory;
-        uint8_t currentRun;
         lsn_t maxLSNInRun;
+        run_number_t currentRun;
 
     public:
         virtual void run();
@@ -405,7 +407,7 @@ public:
         WriterThread(AsyncRingBuffer* writebuf, ArchiveDirectory* directory)
             :
               BaseThread(writebuf, "LogArchiver_WriterThread"),
-              directory(directory), currentRun(0), maxLSNInRun(lsn_t::null)
+              directory(directory), maxLSNInRun(lsn_t::null), currentRun(0)
         {
         }
 
@@ -446,7 +448,7 @@ public:
         BlockAssembly(ArchiveDirectory* directory);
         virtual ~BlockAssembly();
 
-        bool start(int run);
+        bool start(run_number_t run);
         bool add(logrec_t* lr);
         void finish();
         void shutdown();
@@ -458,7 +460,7 @@ public:
         }
 
         // methods that abstract block metadata
-        static int getRunFromBlock(const char* b);
+        static run_number_t getRunFromBlock(const char* b);
         static lsn_t getLSNFromBlock(const char* b);
         static size_t getEndOfBlock(const char* b);
     private:
@@ -470,24 +472,24 @@ public:
         size_t pos;
         size_t fpos;
 
-        lpid_t firstPID;
-        // lpid_t lastPID;
+        PageID firstPID;
+        // PageID lastPID;
         lsn_t maxLSNInBlock;
         int maxLSNLength;
-        int lastRun;
+        run_number_t lastRun;
 
         // if using a variable-bucket index, this is the number of page IDs
         // that will be stored within a bucket (aka restore's segment)
         size_t bucketSize;
         // list of buckets beginning in the current block
-        vector<pair<lpid_t, size_t> > buckets;
+        vector<pair<PageID, size_t> > buckets;
         // number of the nex bucket to be indexed
         size_t nextBucket;
     public:
         struct BlockHeader {
-            uint8_t run;
-            uint32_t end;
             lsn_t lsn;
+            uint32_t end;
+            run_number_t run;
         };
 
     };
@@ -506,7 +508,7 @@ public:
 
         struct RunMerger;
 
-        RunMerger* open(lpid_t startPID, lpid_t endPID, lsn_t startLSN,
+        RunMerger* open(PageID startPID, PageID endPID, lsn_t startLSN,
                 size_t readSize);
 
         void close (RunMerger* merger)
@@ -517,8 +519,8 @@ public:
         struct RunScanner {
             const lsn_t runBegin;
             const lsn_t runEnd;
-            const lpid_t firstPID;
-            const lpid_t lastPID;
+            const PageID firstPID;
+            const PageID lastPID;
 
             size_t offset;
             char* buffer;
@@ -531,7 +533,7 @@ public:
             ArchiveDirectory* directory;
             LogScanner* scanner;
 
-            RunScanner(lsn_t b, lsn_t e, lpid_t f, lpid_t l, fileoff_t o,
+            RunScanner(lsn_t b, lsn_t e, PageID f, PageID l, fileoff_t o,
                     ArchiveDirectory* directory, size_t readSize = 0);
             virtual ~RunScanner();
 
@@ -550,7 +552,7 @@ public:
         struct MergeHeapEntry {
             // store pid and lsn here to speed up comparisons
             bool active;
-            lpid_t pid;
+            PageID pid;
             lsn_t lsn;
             logrec_t* lr;
             RunScanner* runScan;
@@ -563,7 +565,7 @@ public:
             virtual ~MergeHeapEntry() {}
 
             void moveToNext();
-            lpid_t lastPIDinBlock();
+            PageID lastPIDinBlock();
 
             friend std::ostream& operator<<(std::ostream& os,
                     const MergeHeapEntry& e)
@@ -592,7 +594,7 @@ public:
         // Scan interface exposed to caller
         struct RunMerger {
             RunMerger()
-                : heap(cmp), started(false), endPID(lpid_t::null)
+                : heap(cmp), started(false), endPID(0)
             {}
 
             virtual ~RunMerger() {}
@@ -603,13 +605,13 @@ public:
             void close();
 
             size_t heapSize() { return heap.NumElements(); }
-            lpid_t getEndPID() { return endPID; }
+            PageID getEndPID() { return endPID; }
 
         private:
             MergeHeapCmp cmp;
             Heap<MergeHeapEntry, MergeHeapCmp> heap;
             bool started;
-            lpid_t endPID;
+            PageID endPID;
         };
     };
 
@@ -651,28 +653,28 @@ public:
         logrec_t* top();
         void pop();
 
-        int topRun() { return w_heap.First().run; }
+        run_number_t topRun() { return w_heap.First().run; }
         size_t size() { return w_heap.NumElements(); }
     private:
-        uint8_t currentRun;
+        run_number_t currentRun;
         bool filledFirst;
         mem_mgmt_t* workspace;
 
         mem_mgmt_t::slot_t allocate(size_t length);
 
         struct HeapEntry {
-            uint8_t run;
-            lpid_t pid;
-            lsn_t lsn;
             mem_mgmt_t::slot_t slot;
+            lsn_t lsn;
+            run_number_t run;
+            PageID pid;
 
-            HeapEntry(uint8_t run, lpid_t pid, lsn_t lsn,
+            HeapEntry(run_number_t run, PageID pid, lsn_t lsn,
                     mem_mgmt_t::slot_t slot)
-                : run(run), pid(pid), lsn(lsn), slot(slot)
+                : slot(slot), lsn(lsn), run(run), pid(pid)
             {}
 
             HeapEntry()
-                : run(0), pid(lpid_t::null), lsn(lsn_t::null), slot(NULL, 0)
+                : slot(NULL, 0), lsn(lsn_t::null), run(0), pid(0)
             {}
 
             friend std::ostream& operator<<(std::ostream& os,
@@ -711,7 +713,7 @@ public:
      */
     class LogConsumer {
     public:
-        LogConsumer(lsn_t startLSN, size_t blockSize);
+        LogConsumer(lsn_t startLSN, size_t blockSize, bool ignore = true);
         virtual ~LogConsumer();
         void shutdown();
 
@@ -808,8 +810,8 @@ public:
      * page size to ensure that logrec headers are not truncated
      */
     const static int DFT_BLOCK_SIZE = 1024 * 1024; // 1MB = 128 pages
-    const static int DFT_WSPACE_SIZE= 10240 * 10240; // 100MB
-    const static bool DFT_EAGER = false;
+    const static int DFT_WSPACE_SIZE= 100; // 100MB
+    const static bool DFT_EAGER = true;
     const static bool DFT_READ_WHOLE_BLOCKS = true;
     const static int DFT_GRACE_PERIOD = 1000000; // 1 sec
 
@@ -912,7 +914,7 @@ private:
     size_t truncCopied;
     size_t truncMissing;
     size_t toSkip;
-    size_t blockSize;
+    const size_t blockSize;
     char* truncBuf;
     bitset<logrec_t::t_max_logrec> ignore;
 };

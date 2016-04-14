@@ -34,7 +34,6 @@ BackupOnDemandReader::BackupOnDemandReader(vol_t* volume, size_t segmentSize)
       volume(volume), segmentSize(segmentSize)
 {
     w_assert1(volume);
-    firstDataPid = volume->first_data_pageid();
     W_IFDEBUG1(fixedSegment = -1);
 }
 
@@ -44,8 +43,7 @@ char* BackupOnDemandReader::fix(unsigned segment)
     w_assert1(fixedSegment < 0);
 
     // CS: TODO call getPidForSegment
-    // shpid_t offset = shpid_t(segment * segmentSize) + firstDataPid;
-    shpid_t offset = shpid_t(segment * segmentSize);
+    PageID offset = PageID(segment * segmentSize);
     W_COERCE(volume->read_backup(offset, segmentSize, buffer));
 
     W_IFDEBUG1(fixedSegment = segment);
@@ -67,7 +65,6 @@ BackupPrefetcher::BackupPrefetcher(vol_t* volume, size_t numSegments,
       fixWaiting(false), shutdownFlag(false), lastEvicted(numSegments - 1)
 {
     w_assert1(volume);
-    firstDataPid = volume->first_data_pageid();
 
     // initialize all slots as free
     slots = new int[numSegments];
@@ -200,7 +197,7 @@ void BackupPrefetcher::run()
         size_t slotIdx = 0;
         char* readSlot = NULL;
         unsigned next = numSegments; // invalid value
-        shpid_t firstPage;
+        PageID firstPage;
 
         if (wait) {
             usleep(WAIT_TIME);
@@ -219,8 +216,8 @@ void BackupPrefetcher::run()
 
             next = requests.front();
 
-            firstPage = shpid_t(next * segmentSize);
-            if (firstPage >= volume->num_pages()) {
+            firstPage = PageID(next * segmentSize);
+            if (firstPage >= volume->num_used_pages()) {
                 // prefetch request beyond end of volume -- ignore
                 requests.pop_front();
                 continue;
@@ -289,6 +286,11 @@ void BackupPrefetcher::run()
         } // end of critical section
 
         DBG(<< "Prefetching segment " << next);
+        // perform the read into the slot found
+        firstPage = PageID(next * segmentSize);
+        if (firstPage >= volume->num_used_pages()) {
+            return;
+        }
 
         INC_TSTAT(restore_backup_reads);
         W_COERCE(volume->read_backup(firstPage, segmentSize, readSlot));

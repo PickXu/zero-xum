@@ -4,13 +4,8 @@
 
 #include "bf_hashtable.cpp"
 
-w_rc_t bf_tree_m::_grab_free_block(bf_idx& ret, bool evict) {
-#ifdef SIMULATE_MAINMEMORYDB
-    if (true) {
-        ERROUT (<<"MAINMEMORY-DB. _grab_free_block() shouldn't be called. wtf");
-        return RC(eINTERNAL);
-    }
-#endif // SIMULATE_MAINMEMORYDB
+w_rc_t bf_tree_m::_grab_free_block(bf_idx& ret, bool evict)
+{
     ret = 0;
     while (true) {
         // once the bufferpool becomes full, getting _freelist_lock everytime will be
@@ -21,7 +16,7 @@ w_rc_t bf_tree_m::_grab_free_block(bf_idx& ret, bool evict) {
             CRITICAL_SECTION(cs, &_freelist_lock);
             if (_freelist_len > 0) { // here, we do the real check
                 bf_idx idx = FREELIST_HEAD;
-                DBGTHRD(<< "Grabbing idx " << idx);
+                DBG3(<< "Grabbing idx " << idx);
                 w_assert1(_is_valid_idx(idx));
                 // w_assert1 (!get_cb(idx)._used);
                 ret = idx;
@@ -33,33 +28,29 @@ w_rc_t bf_tree_m::_grab_free_block(bf_idx& ret, bool evict) {
                     FREELIST_HEAD = _freelist[idx];
                     w_assert1 (FREELIST_HEAD > 0 && FREELIST_HEAD < _block_cnt);
                 }
-                DBGTHRD(<< "New head " << FREELIST_HEAD);
+                DBG3(<< "New head " << FREELIST_HEAD);
                 w_assert1(ret != FREELIST_HEAD);
                 return RCOK;
             }
         } // exit the scope to do the following out of the critical section
 
         // if the freelist was empty, let's evict some page.
-        if (true == evict)
+        if (evict)
         {
             W_DO (_get_replacement_block());
         }
         else
         {
-            // Freelist is empty and caller does not want to evict pages (Recovery M1)
             return RC(eBFFULL);
         }
     }
     return RCOK;
 }
 
-w_rc_t bf_tree_m::_get_replacement_block() {
-#ifdef SIMULATE_MAINMEMORYDB
-    if (true) {
-        ERROUT (<<"MAINMEMORY-DB. _get_replacement_block() shouldn't be called. wtf");
-        return RC(eINTERNAL);
-    }
-#endif // SIMULATE_MAINMEMORYDB
+w_rc_t bf_tree_m::_get_replacement_block()
+{
+    get_cleaner()->wakeup();
+
     uint32_t evicted_count, unswizzled_count;
 
     /*
@@ -77,7 +68,7 @@ w_rc_t bf_tree_m::_get_replacement_block() {
             return RCOK;
         }
         g_me()->sleep(100);
-        DBGOUT1(<<"woke up. now there should be some page to evict. urgency=" << urgency);
+        DBG3(<<"woke up. now there should be some page to evict. urgency=" << urgency);
         // debug_dump(std::cout);
     }
 
@@ -100,7 +91,8 @@ w_rc_t bf_tree_m::evict_blocks(uint32_t& evicted_count,
         uint32_t& unswizzled_count, evict_urgency_t /* urgency */,
         uint32_t preferred_count)
 {
-    W_DO(wakeup_cleaners());
+    get_cleaner()->wakeup();
+
     if (preferred_count == 0) {
         preferred_count = EVICT_BATCH_RATIO * _block_cnt + 1;
     }
@@ -134,9 +126,9 @@ w_rc_t bf_tree_m::evict_blocks(uint32_t& evicted_count,
             idx = 0;
         }
         if (idx == _eviction_current_frame - 1) {
-            W_DO(wakeup_cleaners());
+            get_cleaner()->wakeup();
             if (evicted_count == 0) {
-                DBG(<< "Eviction stuck! Nonleafs: " << nonleaf_count
+                DBG1(<< "Eviction stuck! Nonleafs: " << nonleaf_count
                         << " invalid parents: " << invalid_parents
                         << " dirty: " << dirty_count);
                 rounds++;
@@ -166,13 +158,13 @@ w_rc_t bf_tree_m::evict_blocks(uint32_t& evicted_count,
         // now we hold an EX latch -- check if leaf and not dirty
         btree_page_h p;
         p.fix_nonbufferpool_page(_buffer + idx);
-        if (p.tag() != t_btree_p || !p.is_leaf() || cb._dirty
-                || !cb._used || cb._in_doubt || p.pid() == p.root())
+        if (p.tag() != t_btree_p || !p.is_leaf() || cb.is_dirty()
+                || !cb._used || p.pid() == p.root())
         {
             cb.latch().latch_release();
             DBG3(<< "Eviction failed on flags for " << idx);
             if (!p.is_leaf()) { nonleaf_count++; }
-            if (cb._dirty) { dirty_count++; }
+            if (cb.is_dirty()) { dirty_count++; }
             idx++;
             continue;
         }
@@ -190,12 +182,11 @@ w_rc_t bf_tree_m::evict_blocks(uint32_t& evicted_count,
 
         // Step 2: latch parent in SH mode
         generic_page *page = &_buffer[idx];
-        lpid_t pid = page->pid;
-        w_assert1(cb._pin_cnt < 0 ||
-                (pid.vol() == cb._pid_vol && pid.page == cb._pid_shpid));
+        PageID pid = page->pid;
+        w_assert1(cb._pin_cnt < 0 || pid == cb._pid);
 
         bf_idx_pair idx_pair;
-        bool found = _hashtable->lookup(bf_key(pid.vol(), pid.page), idx_pair);
+        bool found = _hashtable->lookup(pid, idx_pair);
         bf_idx parent_idx = idx_pair.second;
         w_assert1(!found || idx == idx_pair.first);
 
@@ -229,7 +220,7 @@ w_rc_t bf_tree_m::evict_blocks(uint32_t& evicted_count,
         // it on gdb right after, I guet true. NO IDEA what's happening!
         // w_assert0(parent->tag == t_btree_p);
 
-        general_recordid_t child_slotid = find_page_id_slot(parent, pid.page);
+        general_recordid_t child_slotid = find_page_id_slot(parent, pid);
         // How can this happen if we have latch on both?
         if (child_slotid == GeneralRecordIds::INVALID) {
             DBG3(<< "Eviction failed on slot for " << idx
@@ -246,9 +237,9 @@ w_rc_t bf_tree_m::evict_blocks(uint32_t& evicted_count,
         parent_h.fix_nonbufferpool_page(parent);
         lsn_t old = parent_h.get_emlsn_general(child_slotid);
         if (old < _buffer[idx].lsn) {
-            DBGOUT1(<< "Updated EMLSN on page " << parent_h.pid()
+            DBG3(<< "Updated EMLSN on page " << parent_h.pid()
                     << " slot=" << child_slotid
-                    << " (child pid=" << pid.page << ")"
+                    << " (child pid=" << pid << ")"
                     << ", OldEMLSN=" << old << " NewEMLSN=" << _buffer[idx].lsn);
             w_assert1(parent_cb.latch().held_by_me());
             W_COERCE(_sx_update_child_emlsn(parent_h, child_slotid, _buffer[idx].lsn));
@@ -268,17 +259,16 @@ w_rc_t bf_tree_m::evict_blocks(uint32_t& evicted_count,
             // has EX latch, so I don't know what's happening!
             // - Perhaps the SH latch release does not issue a memory fence?
             //    Nope -- it does issue memory fence
-            set_dirty(parent);
             w_assert1(parent_h.get_emlsn_general(child_slotid) == _buffer[idx].lsn);
         }
 
         // eviction finally suceeded
 
         // remove it from hashtable.
-        bool removed = _hashtable->remove(bf_key(pid.vol(), pid.page));
+        bool removed = _hashtable->remove(pid);
         w_assert1(removed);
 
-        DBG3(<< "EVICTED " << idx << " pid " << pid.page);
+        DBG2(<< "EVICTED " << idx << " pid " << pid);
         cb.clear_except_latch();
         // -1 indicates page was evicted (i.e., it's invalid and can be read into)
         cb._pin_cnt = -1;

@@ -7,7 +7,7 @@
 
 #include <boost/static_assert.hpp>
 
-#include "sm_s.h"
+#include "basics.h"
 #include "lsn.h"
 #include "w_defines.h"
 
@@ -50,29 +50,25 @@ public:
     mutable uint32_t checksum;     // +4 -> 4
 
     /// ID of this page
-    lpid_t           pid;          // +4+4 (= +8) -> 12
-
-    /// ID of the store to which this page belongs (0 if none)
-    snum_t           store;        // +4 -> 16
+    PageID           pid;          // +4 -> 8
 
     /// LSN (Log Sequence Number) of the last write to this page
-    lsn_t            lsn;          // +8 -> 24
+    lsn_t            lsn;          // +8 -> 16
 
-    /// LSN in centralized log of atomic commit protocol
-    lsn_t            clsn;         // +8 -> 32
+    /// ID of the store to which this page belongs (0 if none)
+    StoreID           store;        // +4 -> 20
 
     /// Page type (a page_tag_t)
-    uint16_t         tag;          // +2 -> 34
+    uint16_t         tag;          // +2 -> 22
 
 protected:
     friend class fixable_page_h;   // for access to page_flags&t_to_be_deleted
 
     /// Page flags (an OR of page_flag_t's)
-    uint16_t         page_flags;   //  +2 -> 36
+    uint16_t         page_flags;   //  +2 -> 24
 
     /// Reserved for subclass usage
-    uint32_t         reserved;     //  +4 -> 40
-
+    uint64_t         reserved;     //  +8 -> 32
 
 public:
     /// Calculate the correct value of checksum for this page.
@@ -82,7 +78,7 @@ public:
     friend std::ostream& operator<<(std::ostream&, generic_page_header&);
 };
 // verify compiler tightly packed all of generic_page_header's fields:
-BOOST_STATIC_ASSERT(sizeof(generic_page_header) == 40);
+BOOST_STATIC_ASSERT(sizeof(generic_page_header) == 32);
 
 
 /**
@@ -153,20 +149,16 @@ public:
     generic_page* get_generic_page() const { return _pp; }
 
 
-    const lpid_t& pid() const { return _pp->pid; }
-    vid_t       vol()   const { return _pp->pid.vol(); }
-    snum_t      store() const { return _pp->store; }
-    stid_t      stid()  const { return stid_t(vol(), store()); }
+    PageID pid() const { return _pp->pid; }
+    StoreID      store() const { return _pp->store; }
 
     page_tag_t    tag()   const { return (page_tag_t) _pp->tag; }
 
     const lsn_t&  lsn()   const { return _pp->lsn; }
-    const lsn_t&  clsn()   const { return _pp->clsn; }
-    void          set_lsns(const lsn_t& lsn) { _pp->lsn = lsn; }
 
 protected:
-    generic_page_h(generic_page* s, const lpid_t& pid, page_tag_t tag,
-            snum_t store)
+    generic_page_h(generic_page* s, const PageID& pid, page_tag_t tag,
+            StoreID store)
         : _pp(s)
     {
         ::memset(_pp, 0, sizeof(*_pp));

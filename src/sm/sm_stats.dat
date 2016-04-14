@@ -55,9 +55,10 @@ SM Storage manager = 0x00060000 sm_stats_t {
     u_long bf_more_page_write     Over-eight-page writes to volume
 
     // bf cleaner 
-    u_long bf_cleaner_sweeps    Number of sweeps of the bf_cleaner thread
-    u_long bf_cleaner_signalled Number of sweeps initiated by a kick
-    u_long bf_evicted_while_cleaning Page evicted from bp while being cleaned
+    u_long cleaned_pages     Number of pages cleaned by bf_cleaner thread
+    u_long cleaner_time_cpu  Time spent manipulating cleaner candidate lists
+    u_long cleaner_time_io   Time spent flushing the cleaner workspace
+    u_long cleaner_time_copy Time spent latching and copy page images into workspace
 	                      
 
     // bf cleaner percieves hot page
@@ -327,6 +328,10 @@ SM Storage manager = 0x00060000 sm_stats_t {
     u_long bf_fix_nonroot_count          Fix a non-root page
     u_long bf_fix_nonroot_swizzled_count Fix a non-root page, which is already swizzled
     u_long bf_fix_nonroot_miss_count  Cache miss when fixing a non-root page
+
+    // Restart stats
+    u_long restart_log_analysis_time    Time spend with log analysis (usec)
+    u_long restart_redo_time            Time spend with non-concurrent REDO (usec)
 
     // Restore stats
     u_long restore_sched_seq        Restore scheduled a page in single-pass restore

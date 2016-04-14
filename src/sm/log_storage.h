@@ -58,16 +58,23 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 #define LOG_STORAGE_H
 #include "w_defines.h"
 
-#include "log.h"
+#include "sm_options.h"
 #include <partition.h>
+#include <map>
+#include <vector>
+#include <memory>
+#include <mutex>
+#include <condition_variable>
 
 typedef    smlevel_0::partition_number_t partition_number_t;
-enum       { PARTITION_COUNT= smlevel_0::max_openlog };
-typedef    int    partition_index_t;
+typedef std::map<partition_number_t, shared_ptr<partition_t>> partition_map_t;
 
-class skip_log; // forward
+#define BOOST_FILESYSTEM_NO_DEPRECATED
+#include <boost/filesystem.hpp>
+namespace fs = boost::filesystem;
 
-/*  -- do not edit anything above this line --   </std-header>*/
+class skip_log;
+class partition_recycler_t;
 
 class log_storage {
 
@@ -75,239 +82,58 @@ class log_storage {
 
     // use friend mechanism until better interface is implemented
     friend class partition_t;
+    friend class partition_recycler_t;
 
 public:
-    log_storage(const char* path, bool reformat, lsn_t& curr_lsn,
-        lsn_t& durable_lsn, lsn_t& flush_lsn, long segsize);
+    log_storage(const sm_options&);
     virtual ~log_storage();
 
-    partition_t*    get_partition_for_flush(lsn_t start_lsn,
+    shared_ptr<partition_t>    get_partition_for_flush(lsn_t start_lsn,
                             long start1, long end1, long start2, long end2);
-    partition_t*    find_partition(lsn_t&, bool existing, bool recovery, bool forward);
-    rc_t last_lsn_in_partition(partition_number_t pnum, lsn_t& lsn);
-    partition_t*    curr_partition() const;
-    int             delete_old_partitions(lsn_t);
-    long            prime(char* buf, lsn_t next, size_t block_size,
-                            bool read_whole_block = true);
-    void            acquire_partition_lock();
-    void            release_partition_lock();
-    void            set_master(const lsn_t& master_lsn, const lsn_t& min_lsn,
-                            const lsn_t& min_xct_lsn);
+    shared_ptr<partition_t>    curr_partition() const;
 
-    void            acquire_scavenge_lock();
-    void            release_scavenge_lock();
-    void            signal_scavenge_cond();
+    shared_ptr<partition_t>       get_partition(partition_number_t n) const;
 
-    // for partition_t
-    void                unset_current();
-    void                set_current(partition_index_t, partition_number_t);
-    partition_index_t   partition_index() const { return _curr_index; }
-    virtual partition_number_t  partition_num() const { return _curr_num; }
-    partition_t *       get_partition(partition_number_t n) const;
-    static long         floor2(long offset, long block_size)
-                            { return offset & -block_size; }
-    static long         ceil2(long offset, long block_size)
-                           { return
-                               floor2(offset + block_size - 1, block_size); }
-
-
-    const char *        dir_name() { return _logdir; }
-
-    lsn_t               master_lsn() const {
-                            ASSERT_FITS_IN_POINTER(lsn_t);
-                            // else need to grab the partition mutex
-                            return _master_lsn;
-                        }
-
-    // public for use in xct_impl in log-full handling...
-    /**\brief
-     * \details
-     * Set at constructor time and when a new master is created (set_master)
-     */
-    lsn_t               min_chkpt_rec_lsn() const {
-                            ASSERT_FITS_IN_POINTER(lsn_t);
-                            // else need to grab the partition mutex
-                            return _min_chkpt_rec_lsn;
-                        }
     // used by partition_t
     skip_log*       get_skip_log()  { return _skip_log; }
 
-    /* Q: how much reservable space does scavenging pcount partitions
-          give back?
+    fileoff_t get_partition_size() const { return _partition_size; }
 
-      A: everything except a bit we have to keep to ensure the log
-          can always be flushed.
-     */
-    size_t              recoverable_space(int pcount) const {
-        // NEH: substituted BLOCK_SIZE for writebufsize()/PARTITION_COUNT
-        // just a guess; writebufsize is no more...
-                               return pcount*(_partition_data_size - BLOCK_SIZE);
-                            }
+    string make_log_name(partition_number_t pnum) const;
+    fs::path make_log_path(partition_number_t pnum) const;
 
-    fileoff_t           partition_data_size() const {
-                            return _partition_data_size; }
-
-    /**\brief used by partition */
-    fileoff_t limit() const { return _partition_size; }
-
-    /**\brief Return name of log file for given partition number.
-     * \details
-     * Used by xct for error-reporting and callback-handling.
-     */
-    const char * make_log_name(uint32_t n,
-                        char*              buf,
-                        int                bufsz);
-
-    static long         _floor(long offset, long block_size)
-                            { return (offset/block_size)*block_size; }
-    static long         _ceil(long offset, long block_size)
-                            { return _floor(offset + block_size - 1, block_size); }
-    static fileoff_t          partition_size(long psize);
-    static fileoff_t          min_partition_size();
-    static fileoff_t          max_partition_size();
-
-    // use in dump_page_lsn_chain (log_spr.cpp)
-    // TODO fix dump function and delete this -- not thread safe!
-    void reset_master_lsn(lsn_t master) { _master_lsn = master; }
-
-    lsn_t               global_min_lsn() const
-        {  return std::min(_master_lsn, _min_chkpt_rec_lsn); }
+    void wakeup_recycler();
+    unsigned delete_old_partitions(partition_number_t older_than = 0);
 
 private:
-    void                _prime(int fd, fileoff_t start, lsn_t next);
-    void     destroy_file(partition_number_t n, bool e);
+    shared_ptr<partition_t> create_partition(partition_number_t pnum);
 
-    partition_index_t   _get_index(partition_number_t)const;
+    fs::path _logpath;
+    fileoff_t _partition_size;
 
-    partition_t *       _close_min(partition_number_t n);
-                                // the defaults are for the case
-                                // in which we're opening a file to
-                                // be the new "current"
-    partition_t *       _open_partition(partition_number_t n,
-                            const lsn_t&  end_hint,
-                            bool existing,
-                            bool forappend,
-                            bool during_recovery
-                        );
-    partition_t *       _open_partition_for_append(partition_number_t n,
-                            const lsn_t&  end_hint,
-                            bool existing,
-                            bool during_recovery
-                        ) { return _open_partition(n,
-                                    end_hint, existing,
-                                    true, during_recovery);
-                          }
-    partition_t *       _open_partition_for_read(partition_number_t n,
-                            const lsn_t&  end_hint,
-                            bool existing,
-                            bool during_recovery
-                        ) { return _open_partition(n,
-                                    end_hint, existing,
-                                    false, during_recovery);
-                          }
+    partition_map_t _partitions;
+    shared_ptr<partition_t> _curr_partition;
 
-    /**\brief Helper for _write_master */
-    static void         _create_master_chkpt_contents(
-                            ostream&        s,
-                            int             arraysize,
-                            const lsn_t*    array
-                            );
+    skip_log* _skip_log;
 
-    /**\brief Helper for _make_master_name */
-    static void         _create_master_chkpt_string(
-                            ostream&        o,
-                            int             arraysize,
-                            const lsn_t*    array,
-                            bool            old_style = false
-                            );
+    unsigned _max_partitions;
+    bool _delete_old_partitions;
 
-    /**\brief Helper for _read_master */
-    static rc_t         _parse_master_chkpt_contents(
-                            istream&      s,
-                            int&          listlength,
-                            lsn_t*        lsnlist
-                            );
-
-    /**\brief Helper for _read_master */
-    static rc_t         _parse_master_chkpt_string(
-                            istream&      s,
-                            lsn_t&        master_lsn,
-                            lsn_t&        min_chkpt_rec_lsn,
-                            int&          number_of_others,
-                            lsn_t*        others,
-                            bool&         old_style
-                            );
-
-    /**\brief Helper for parse_master_chkpt_string */
-    static rc_t         _check_version(
-                            uint32_t        major,
-                            uint32_t        minor
-                            );
-    // helper for set_master
-    void                _write_master(const lsn_t &l, const lsn_t &min);
-
-    // used by implementation
-    w_rc_t              _read_master(
-                            const char *fname,
-                            int prefix_len,
-                            lsn_t &tmp,
-                            lsn_t& tmp1,
-                            lsn_t* lsnlist,
-                            int&   listlength,
-                            bool&  old_style
-                            );
-    void                _make_master_name(
-                            const lsn_t&        master_lsn,
-                            const lsn_t&        min_chkpt_rec_lsn,
-                            char*               buf,
-                            int                 bufsz,
-                            bool                old_style = false);
-    bool _partition_exists(partition_number_t pnum);
-
-
-private:
-    char*           _logdir;
-    long            _segsize;
-    fileoff_t               _partition_size;
-    fileoff_t               _partition_data_size;
-    lsn_t                   _min_chkpt_rec_lsn;
-    partition_t         _part[PARTITION_COUNT];
-    skip_log*           _skip_log;
-    partition_index_t   _curr_index; // index of partition
-    partition_number_t  _curr_num;   // partition number
-    lsn_t                   _master_lsn;
-    mutable queue_based_block_lock_t _partition_lock;
-
-    pthread_mutex_t     _scavenge_lock;
-    pthread_cond_t      _scavenge_cond;
-
-    w_rc_t          _set_size(fileoff_t psize);
-    fileoff_t       _get_min_size() const {
-                        // Return minimum log size as a function of the
-                        // log buffer size and the partition count
-                        return ( _segsize + BLOCK_SIZE) * PARTITION_COUNT;
-                    }
-    partition_t *   _partition(partition_index_t i) const;
-
-    int             get_last_lsns(lsn_t* array);
-
-private:
     // forbid copy
     log_storage(const log_storage&);
     log_storage& operator=(const log_storage&);
 
+    void try_delete(partition_number_t);
+
+    // Latch to protect access to partition map
+    mutable mcs_rwlock _partition_map_latch;
+
+    unique_ptr<partition_recycler_t> _recycler_thread;
+
 public:
-    enum { BLOCK_SIZE=partition_t::XFERSIZE };
-
-    static const char    _SLASH;
-    static const uint32_t  _version_major;
-    static const uint32_t  _version_minor;
-    static const char    _master_prefix[];
-    static const char    _log_prefix[];
-    static const char *master_prefix() { return _master_prefix; }
-    static const char *log_prefix() { return _log_prefix; }
-
-    void sanity_check() const;
+    enum { BLOCK_SIZE = partition_t::XFERSIZE };
+    static const string log_prefix;
+    static const string log_regex;
 };
 
 #endif

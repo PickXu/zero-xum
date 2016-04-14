@@ -61,51 +61,31 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 #define SM_SOURCE
 #define SM_C
 
-#ifdef __GNUG__
-class prologue_rc_t;
-#endif
-
 #include "w.h"
 #include "sm_base.h"
 #include "chkpt.h"
-#include "chkpt_serial.h"
 #include "sm.h"
-#include "sm_vtable_enum.h"
-#include "prologue.h"
 #include "vol.h"
 #include "bf_tree.h"
-#include "crash.h"
 #include "restart.h"
 #include "sm_options.h"
 #include "suppress_unused.h"
-#include "backup.h"
 #include "tid_t.h"
 #include "log_carray.h"
 #include "log_lsn_tracker.h"
 #include "bf_tree.h"
+#include "stopwatch.h"
+#include "alloc_cache.h"
 
 #include "allocator.h"
 #include "plog_xct.h"
-#include "logbuf_common.h"
 #include "log_core.h"
-#include "logbuf_core.h"
 #include "eventlog.h"
 
-
-#ifdef EXPLICIT_TEMPLATE
-template class w_auto_delete_t<SmStoreMetaStats*>;
-#endif
 
 bool         smlevel_0::shutdown_clean = false;
 bool         smlevel_0::shutting_down = false;
 
-smlevel_0::operating_mode_t
-            smlevel_0::operating_mode = smlevel_0::t_not_started;
-
-lsn_t        smlevel_0::commit_lsn = lsn_t::null;
-lsn_t        smlevel_0::redo_lsn = lsn_t::null;
-lsn_t        smlevel_0::last_lsn = lsn_t::null;
-uint32_t     smlevel_0::in_doubt_count = 0;
 
 #ifdef USE_TLS_ALLOCATOR
     sm_tls_allocator smlevel_0::allocator;
@@ -114,11 +94,6 @@ uint32_t     smlevel_0::in_doubt_count = 0;
 #endif
 
 
-// This is the controlling variable to determine which mode to use at run time if user did not specify restart mode:
-smlevel_0::restart_internal_mode_t
-           smlevel_0::restart_internal_mode =
-                 (smlevel_0::restart_internal_mode_t)m1_default_restart;
-
 
             //controlled by AutoTurnOffLogging:
 bool        smlevel_0::lock_caching_default = true;
@@ -126,19 +101,6 @@ bool        smlevel_0::logging_enabled = true;
 bool        smlevel_0::do_prefetch = false;
 
 bool        smlevel_0::statistics_enabled = true;
-
-#ifndef SM_LOG_WARN_EXCEED_PERCENT
-#define SM_LOG_WARN_EXCEED_PERCENT 40
-#endif
-smlevel_0::fileoff_t smlevel_0::log_warn_trigger = 0;
-int                  smlevel_0::log_warn_exceed_percent =
-                                    SM_LOG_WARN_EXCEED_PERCENT;
-ss_m::LOG_WARN_CALLBACK_FUNC
-                     smlevel_0::log_warn_callback = 0;
-ss_m::LOG_ARCHIVED_CALLBACK_FUNC
-                     smlevel_0::log_archived_callback = 0;
-
-smlevel_0::fileoff_t        smlevel_0::chkpt_displacement = 0;
 
 /*
  * _being_xct_mutex: Used to prevent xct creation during volume dismount.
@@ -152,16 +114,13 @@ smlevel_0::fileoff_t        smlevel_0::chkpt_displacement = 0;
 static srwlock_t          _begin_xct_mutex;
 
 BackupManager* smlevel_0::bk = 0;
-vol_m* smlevel_0::vol = 0;
+vol_t* smlevel_0::vol = 0;
 bf_tree_m* smlevel_0::bf = 0;
-log_m* smlevel_0::log = 0;
+log_core* smlevel_0::log = 0;
 log_core* smlevel_0::clog = 0;
 LogArchiver* smlevel_0::logArchiver = 0;
 
 lock_m* smlevel_0::lm = 0;
-
-ErrLog*            smlevel_0::errlog;
-
 
 char smlevel_0::zero_page[page_sz];
 
@@ -180,54 +139,6 @@ smlevel_0::xct_impl_t smlevel_0::xct_impl
     = smlevel_0::XCT_PLOG;
 #endif
 
-class ticker_thread_t : public smthread_t
-{
-public:
-    ticker_thread_t(bool msec = false)
-        : smthread_t(t_regular, "ticker"), msec(msec)
-    {
-        interval_usec = 1000; // 1ms
-        if (!msec) {
-            interval_usec *= 1000;
-        }
-        stop = false;
-    }
-
-    virtual ~ticker_thread_t() {}
-
-    void shutdown()
-    {
-        stop = true;
-        lintel::atomic_thread_fence(lintel::memory_order_release);
-    }
-
-    void run()
-    {
-        while (true) {
-            lintel::atomic_thread_fence(lintel::memory_order_acquire);
-            if (stop) {
-                return;
-            }
-            ::usleep(interval_usec);
-            if (msec) {
-                sysevent::log(logrec_t::t_tick_msec);
-            }
-            else {
-                sysevent::log(logrec_t::t_tick_sec);
-            }
-        }
-    }
-
-private:
-    int interval_usec;
-    bool msec;
-    bool stop;
-    // 80 bytes is enough to hold ticker logrec
-    char lrbuf[80];
-};
-
-ticker_thread_t* smlevel_0::_ticker = 0;
-
 /*
  *  Class ss_m code
  */
@@ -238,63 +149,19 @@ ticker_thread_t* smlevel_0::_ticker = 0;
 int ss_m::_instance_cnt = 0;
 sm_options ss_m::_options;
 
-/*
- * NB: reverse function, _make_store_property
- * is defined in dir.cpp -- so far, used only there
- */
-ss_m::store_flag_t
-ss_m::_make_store_flag(store_property_t property)
-{
-    store_flag_t flag = st_unallocated;
-
-    switch (property)  {
-        case t_regular:
-            flag = st_regular;
-            break;
-        case t_temporary:
-            flag = st_tmp;
-            break;
-        case t_load_file:
-            flag = st_load_file;
-            break;
-        case t_insert_file:
-            flag = st_insert_file;
-            break;
-        case t_bad_storeproperty:
-        default:
-            W_FATAL_MSG(eINTERNAL, << "bad store property :" << property );
-            break;
-    }
-
-    return flag;
-}
-
 
 static queue_based_block_lock_t ssm_once_mutex;
-ss_m::ss_m(
-    const sm_options &options,
-    smlevel_0::LOG_WARN_CALLBACK_FUNC callbackwarn /* = NULL */,
-    smlevel_0::LOG_ARCHIVED_CALLBACK_FUNC callbackget /* = NULL */,
-    bool start /* = true for backward compatibility reason */
-)
+ss_m::ss_m(const sm_options &options)
 {
     _options = options;
 
     sthread_t::initialize_sthreads_package();
 
-    // Save input parameters for future 'startup' calls
-    // input parameters cannot be modified after ss_m object has been constructed
-    smlevel_0::log_warn_callback  = callbackwarn;
-    smlevel_0::log_archived_callback  = callbackget;
-
     // Start the store during ss_m constructor if caller is asking for it
-    if (true == start)
-    {
-        bool started = startup();
-        // If error encountered, raise fatal error if it was not raised already
-        if (false == started)
-            W_FATAL_MSG(eINTERNAL, << "Failed to start the store from ss_m constructor");
-    }
+    bool started = startup();
+    // If error encountered, raise fatal error if it was not raised already
+    if (!started)
+        W_FATAL_MSG(eINTERNAL, << "Failed to start the store from ss_m constructor");
 }
 
 bool ss_m::startup()
@@ -357,50 +224,14 @@ bool ss_m::shutdown()
 void
 ss_m::_construct_once()
 {
-    FUNC(ss_m::_construct_once);
+    stopwatch_t timer;
 
-    // Use the options and callbacks from ss_m constructor, no change allowed
-
-    // The input paramters were saved during ss_m constructor
-    //   smlevel_0::log_warn_callback  = warn;
-    //   smlevel_0::log_archived_callback  = get;
-
-    // Clear out the fingerprint map for the smthreads.
-    // All smthreads created after this will be compared against
-    // this map for duplication.
     smthread_t::init_fingerprint_map();
 
     if (_instance_cnt++)  {
-        // errlog might not be null since in this case there was another instance.
-        if(errlog) {
-            errlog->clog << fatal_prio
-            << "ss_m cannot be instantiated more than once"
-             << flushl;
-        }
+        cerr << "ss_m cannot be instantiated more than once" << endl;
         W_FATAL_MSG(eINTERNAL, << "instantiating sm twice");
     }
-
-    /*
-     *  Level 0
-     */
-    errlog = new ErrLog("ss_m", log_to_unix_file, _options.get_string_option("sm_errlog", "-").c_str());
-    if(!errlog) {
-        W_FATAL(eOUTOFMEMORY);
-    }
-
-
-    std::string error_loglevel = _options.get_string_option("sm_errlog_level", "error");
-    errlog->setloglevel(ErrLog::parse(error_loglevel.c_str()));
-    ///////////////////////////////////////////////////////////////
-    // Henceforth, all errors can go to ss_m::errlog thus:
-    // ss_m::errlog->clog << XXX_prio << ... << flushl;
-    // or
-    // ss_m::errlog->log(log_XXX, "format...%s..%d..", s, n); NB: no newline
-    ///////////////////////////////////////////////////////////////
-#if W_DEBUG_LEVEL > 0
-	// just to be sure errlog is working
-	errlog->clog << debug_prio << "Errlog up and running." << flushl;
-#endif
 
     w_assert1(page_sz >= 1024);
 
@@ -409,85 +240,85 @@ ss_m::_construct_once()
      */
     shutting_down = false;
     shutdown_clean = _options.get_bool_option("sm_shutdown_clean", false);
-    if (_options.get_bool_option("sm_truncate_log", false)) {
+    if (_options.get_bool_option("sm_format", false)) {
         shutdown_clean = true;
     }
 
-    // choose log manager implementation
-    std::string logimpl = _options.get_string_option("sm_log_impl", log_core::IMPL_NAME);
-
-
-    // For Instant Restart testing purpose, determine which
-    // internal code path to use
-    _set_recovery_mode();
-
-    bf = new bf_tree_m(_options);
-    if (! bf) {
-        W_FATAL(eOUTOFMEMORY);
-    }
+    ERROUT(<< "[" << timer.time_ms() << "] Initializing lock manager");
 
     lm = new lock_m(_options);
     if (! lm)  {
         W_FATAL(eOUTOFMEMORY);
     }
 
-    bk = new BackupManager(_options.get_string_option("sm_backup_dir", "."));
-    if (! bk) {
-        W_FATAL(eOUTOFMEMORY);
-    }
-
-    vol = new vol_m(_options);
-    if (!vol) {
-        W_FATAL(eOUTOFMEMORY);
-    }
+    ERROUT(<< "[" << timer.time_ms() << "] Initializing log manager (part 1)");
 
     /*
      *  Level 1
      */
-    cout << "LOG IMPL" << logimpl << endl;
-    smlevel_0::logging_enabled = _options.get_bool_option("sm_logging", true);
-    if (logging_enabled)
-    {
 #ifndef USE_ATOMIC_COMMIT // otherwise, log and clog will point to the same log object
-        if (logimpl == logbuf_core::IMPL_NAME) {
-            log = new logbuf_core(_options);
-        }
-        else { // traditional
-            log = new log_core(_options);
-        }
+    log = new log_core(_options);
+    ERROUT(<< "[" << timer.time_ms() << "] Initializing log manager (part 2)");
+    W_COERCE(log->init());
 #else
-        /*
-         * Centralized log used for atomic commit protocol (by Caetano).
-         * See comments in plog.h
-         */
-        clog = new log_core(_options);
-        log = clog;
-        w_assert0(log);
+    /*
+     * Centralized log used for atomic commit protocol (by Caetano).
+     * See comments in plog.h
+     */
+    clog = new log_core(_options);
+    log = clog;
+    w_assert0(log);
 #endif
 
-        // LOG ARCHIVER
-        bool archiving = _options.get_bool_option("sm_archiving", false);
-        if (archiving) {
-            logArchiver = new LogArchiver(_options);
-            logArchiver->fork();
-        }
-    } else {
-        /* Run without logging at your own risk. */
-        errlog->clog << warning_prio <<
-        "WARNING: Running without logging! Do so at YOUR OWN RISK. "
-        << flushl;
+    ERROUT(<< "[" << timer.time_ms() << "] Initializing log archiver");
+
+    // LOG ARCHIVER
+    bool archiving = _options.get_bool_option("sm_archiving", false);
+    if (archiving) {
+        logArchiver = new LogArchiver(_options);
+        logArchiver->fork();
+    }
+
+    ERROUT(<< "[" << timer.time_ms() << "] Initializing restart manager");
+
+    // Log analysis provides info required to initialize vol_t
+    recovery = new restart_m(_options);
+    recovery->log_analysis();
+    chkpt_t* chkpt_info = recovery->get_chkpt();
+
+    bool instantRestart = _options.get_bool_option("sm_restart_instant", true);
+    bool format = _options.get_bool_option("sm_format", false);
+
+    ERROUT(<< "[" << timer.time_ms() << "] Initializing volume manager");
+
+    // If not instant restart, pass null dirty page table, which disables REDO
+    // recovery based on SPR so that it is done explicitly by restart_m below.
+    vol = new vol_t(_options,
+            instantRestart ? chkpt_info : NULL);
+
+    ERROUT(<< "[" << timer.time_ms() << "] Initializing buffer manager");
+
+    bf = new bf_tree_m(_options);
+    if (! bf) {
+        W_FATAL(eOUTOFMEMORY);
+    }
+
+    ERROUT(<< "[" << timer.time_ms() << "] Building volume manager caches");
+
+    if (instantRestart) {
+        vol->build_caches(format);
+    }
+
+    // Initialize cleaner once vol caches are built
+    int cleaner_int = _options.get_int_option("sm_cleaner_interval", 0);
+    if (cleaner_int >= 0) {
+        // Getter will initialize cleaner on demand
+        bf->get_cleaner();
     }
 
     smlevel_0::statistics_enabled = _options.get_bool_option("sm_statistics", true);
 
-    // start buffer pool cleaner when the log module is ready
-    W_COERCE(bf->init());
-
-    DBG(<<"Level 2");
-
-    /*
-     *  Level 2
-     */
+    ERROUT(<< "[" << timer.time_ms() << "] Initializing buffer cleaner and other services");
 
     bt = new btree_m;
     if (! bt) {
@@ -495,349 +326,50 @@ ss_m::_construct_once()
     }
     bt->construct_once();
 
-    DBG(<<"Level 3");
-    /*
-     *  Level 3
-     */
-    chkpt = new chkpt_m;
+    chkpt = new chkpt_m(_options);
     if (! chkpt)  {
         W_FATAL(eOUTOFMEMORY);
     }
-    // Spawn the checkpoint child thread immediatelly
-    chkpt->spawn_chkpt_thread();
 
-    DBG(<<"Level 4");
-    /*
-     *  Level 4
-     */
     SSM = this;
 
     me()->mark_pin_count();
 
-    _ticker = NULL;
-    if (_options.get_bool_option("sm_ticker_enable", false)) {
-        bool msec = _options.get_bool_option("sm_ticker_msec", false);
-        _ticker = new ticker_thread_t(msec);
-        _ticker->fork();
-    }
-
-    _do_restart();
-
     do_prefetch = _options.get_bool_option("sm_prefetch", false);
-    DBG(<<"constructor done");
 
-    // System is opened for user transactions once the function returns
-}
+    ERROUT(<< "[" << timer.time_ms() << "] Performing offline recovery");
 
-void ss_m::_do_restart()
-{
-    /*
-     * Mount the volumes for recovery.  For now, we automatically
-     * mount all volumes.  A better solution would be for restart_m
-     * to tell us, after analysis, whether any volumes should be
-     * mounted.  If not, we can skip the mount/dismount.
-     */
-
-    lsn_t     verify_lsn = lsn_t::null;  // verify_lsn is for use_concurrent_commit_restart() only
-    lsn_t     redo_lsn = lsn_t::null;    // used if log driven REDO with use_concurrent_XXX_restart()
-    lsn_t     last_lsn = lsn_t::null;    // used if page driven REDO with use_concurrent_XXX_restart()
-    uint32_t  in_doubt_count = 0;        // used if log driven REDO with use_concurrent_XXX_restart()
-    lsn_t     master = log->master_lsn();
-
-    if (_options.get_bool_option("sm_logging", true))
-    {
-        // Start the recovery process as sequential  operations
-        // The recovery manager is on the stack, it will be destroyed once it is
-        // out of scope
-        restart_m restart;
-
-        // Recovery process, a checkpoint will be taken at the end of recovery
-        // Make surethe current operating state is before recovery
-        smlevel_0::operating_mode = t_not_started;
-        restart.restart(master, verify_lsn, redo_lsn, last_lsn, in_doubt_count);
-
-        // CS TODO: Why did we have to mount and dismount all devices here?
-#if 0
-        // Perform the low level dismount, remount in higher level
-        // and dismount again steps.
-        // If running in serial mode, everything is fine.
-        // If running in concurrent mode, no final higher level dismount.
-        // Special case: the mount operation pre-loads the root page as
-        // a side effect, if the root page does not exist on disk (e.g., B-tree
-        // has only one page worth of data and was never flushed before crash),
-        // the mount operation would detect 'page not exist' condition and zero
-        // out the root page, this is bad because if the root page was marked as
-        // an in_doubt during Log Analysis, this information would be erased
-        // when the page got zero out.  This is handled in bf_tree_m::_preload_root_page
-        // to put the in_doubt flag back to the root page.
-
-        // contain the scope of dname[]
-        // record all the mounted volumes after recovery.
-
-        std::vector<string> dnames;
-        std::vector<vid_t> vids;
-        W_COERCE( io->get_vols(0, max_vols, dnames, vids) );
-
-        DBG(<<"Dismount all volumes " << dnames.size());
-        // now dismount all of them at the io level, the level where they
-        // were mounted during recovery.
-        if (true == smlevel_0::use_serial_restart())
-            W_COERCE( io->dismount_all(true /*flush*/) );
-        else
-            W_COERCE( io->dismount_all(true /*flush*/, false /*clear_cb*/) ); // do not clear cb if in concurrent recovery mode
-        // now mount all the volumes properly at the sm level.
-        // then dismount them and free temp files only if there
-        // are no locks held.
-        for (int i = 0; i < dnames.size(); i++)
-        {
-            rc_t rc;
-            DBG(<<"Remount volume " << dname[i]);
-            rc =  mount_vol(dname[i], vid[i]) ;
-            if (rc.is_error())
-            {
-                ss_m::errlog->clog  << warning_prio
-                << "Volume on device " << dname[i]
-                << " was only partially formatted; cannot be recovered."
-                << flushl;
-            }
-            else
-            {
-                // Dismount only if running in serial mode
-                if (true == smlevel_0::use_serial_restart()) {
-                    // CS: switched to volume dismount after removing device manager
-                    /* W_COERCE( _dismount_dev(dname[i])); */
-                    W_COERCE(io->dismount(vid[i]));
-                }
-            }
+    // If not using instant restart, perform log-based REDO before opening up
+    if (instantRestart) {
+        recovery->spawn_recovery_thread();
+    }
+    else {
+        if (_options.get_bool_option("sm_restart_log_based_redo", true)) {
+            recovery->redo_log_pass();
         }
-        delete [] vid;
-        for (i = 0; i < max_vols; i++) {
-            delete [] dname[i];
+        else {
+            recovery->redo_page_pass();
         }
-        delete [] dname;
-#endif
+        // metadata caches can only be constructed now
+        vol->build_caches(format);
+        // system now ready for UNDO
+        // CS TODO: can this be done concurrently by restart thread?
+        recovery->undo_pass();
+
+        log->discard_fetch_buffers();
+
+        // CS: added this for debugging, but consistency check fails
+        // even right after loading -- so it's not a recovery problem
+        // vector<StoreID> stores;
+        // vol->get_stnode_cache()->get_used_stores(stores);
+        // for (size_t i = 0; i < stores.size(); i++) {
+        //     bool consistent;
+        //     W_COERCE(ss_m::verify_index(stores[i], 31, consistent));
+        //     w_assert0(consistent);
+        // }
     }
 
-    // Pure on-demand mode must be the same for REDO and UNDO phases
-    if (smlevel_0::use_redo_demand_restart() != smlevel_0::use_undo_demand_restart())
-    {
-        W_FATAL_MSG(fcINTERNAL, << "Inconsistent mode between on-demand REDO and UNDO");
-    }
-
-    // Store some information globally in all cases, because although M3 does not use
-    // child restart thread initially, it uses child restart thread during normal shutdown
-    // REDO from child thread will use redo_lsn, last_lsn and in_doubt_count
-    // to control the REDO phase
-    smlevel_0::redo_lsn = redo_lsn;              // Log driven REDO, starting point for forward log scan
-    smlevel_0::last_lsn = last_lsn;              // page driven REDO, last LSN in Recovery log before system crash
-    smlevel_0::in_doubt_count = in_doubt_count;
-
-    if ((false == smlevel_0::use_serial_restart()) &&         // Not serial, so must be concurrent mode
-         (false == smlevel_0::use_redo_demand_restart()) &&   // Not pure on-demand redo, so need child thread
-         (false == smlevel_0::use_undo_demand_restart()))     // Not pure on-demand undo, so need child thread
-
-    {
-        // Log Analysis has completed but no REDO or UNDO yet
-        // exception: M5 (ARIES) did the REDO already, but no UNDO
-        // Start the recovery process child thread to carry out
-        // the REDO and UNDO phases if not in serial or pure on-demand mode
-        // which means M2 (traditional), M4 (mixed) and M5 (ARIES) would start the child thread
-        // Child thread will carry out both REDO and UNDO
-        // for M5 (ARIES), in_doubt count is already 0 therefore no need to REDO again
-
-        if (_options.get_bool_option("sm_logging", true))
-        {
-            // If we have the recovery process
-
-            // Check the operating mode
-            w_assert1(t_in_analysis == smlevel_0::operating_mode);
-
-            // Store commit_lsn globally, concurrent txn uses commit_lsn
-            // only if use_concurrent_commit_restart (M2)
-            smlevel_0::commit_lsn = verify_lsn;
-
-            if (lsn_t::null != master)
-            {
-                // If it is not an empty database, then instinate
-                // the recovery manager because we need to persist it
-                // Note that even if the database is not empty, it does
-                // not mean we have recovery work to do in REDO and
-                // UNDO phases
-
-                // Commit_lsn could be null if:
-                // 1. Empty database
-                // 2. No recovery work to do
-
-                w_assert1(!recovery);
-                recovery = new restart_m();
-                if (! recovery)
-                {
-                    W_FATAL(eOUTOFMEMORY);
-                }
-                recovery->spawn_recovery_thread();
-            }
-        }
-
-        // Continue the process to open system for user transactions immediatelly
-        // No buffer pool flush or user checkpoint in this case
-
-        smlevel_0::operating_mode = t_forward_processing;
-
-        // Have the log initialize its reservation accounting.
-        // while Recovery REDO and UNDO is happening concurrently
-        // the 'activate_reservations' does not affect Recovery task
-        // althought the calculation might be off since UNDO might not be
-        // completed yet
-        if (log)
-            log->activate_reservations();
-
-        // Do not flush buffer pool or take checkpoint because recovery
-        // is still going on
-
-    }
-    else
-    {
-        // If in serial or pure on-demand mode, change the operating state
-        // to allow concurrent transactions to come in
-        // No child restart thread for these modes
-
-        smlevel_0::operating_mode = t_forward_processing;
-
-        // Have the log initialize its reservation accounting.
-        if(log)
-            log->activate_reservations();
-
-        // Force the log after recovery.  The background flush threads exist
-        // and might be working due to recovery activities.
-        // But to avoid interference with their control structure,
-        // we will do this directly.  Take a checkpoint as well.
-        if(log)
-        {
-            bf->force_until_lsn(log->curr_lsn().data());
-
-            // An synchronous checkpoint was taken at the end of recovery
-            // This is a synchronous checkpoint after buffer pool flush
-            chkpt->synch_take();
-        }
-
-        // Debug only
-        me()->check_pin_count(0);
-
-    }
-}
-
-void ss_m::_finish_recovery()
-{
-    if ((shutdown_clean) && (true == smlevel_0::use_redo_demand_restart()))
-    {
-        // If we have a clean shutdown and the current system is using
-        // pure on-demand recovery (no child restart thread), we might
-        // still have a lot of recovery work to do at this point
-        // Because we are doing a clean shutdown, we do not want to have
-        // leftover restart work, spawn the restart child thread to finish up
-        // the restart work first and then shutdown
-
-        w_assert1(!recovery);
-        recovery = new restart_m();
-        if (recovery)
-            recovery->spawn_recovery_thread();
-    }
-
-    // get rid of all non-prepared transactions
-    // First... disassociate me from any tx
-    if(xct()) {
-        me()->detach_xct(xct());
-    }
-
-    if (recovery)
-    {
-        // The recovery object is only inistantiated if open system for user
-        // transactions during recovery
-        w_assert1(false == smlevel_0::use_serial_restart());
-
-        // The destructor of restart_m terminates (no wait if crash shutdown)
-        // the child thread if the child thread is still active.
-        // The child thread is for Recovery process only, it should terminate
-        // itself after the Recovery process completed
-
-        delete recovery;
-        recovery = 0;
-    }
-    // At this point, the restart_m should no longer exist and we are safe to continue the
-    // shutdown process
-    w_assert1(!recovery);
-
-    // Failure on failure scenarios -
-    // Normal shutdown:
-    //    Works correctly even if the 2nd shutdown request came in before the first restart
-    //    process finished.
-    //        Tranditional serial shutdown - System was not opened while restart is going on
-    //        Tranditional serial shutdown - The cleanup() call rolls back all in-flight transactions
-    //        Pure on-demand shutdown using commit_lsn - The cleanup() call rolls back all
-    //                                                                            in-flight transactions
-    //        Pure on-demand shutdown using locks - The cleanup() call rolls back all
-    //                                                                   in-flight transactions
-    //        Mixed mode using locks - The cleanup() call rolls back all in-flight transactions
-    //
-    // Simulated system crash through 'shutdown_clean flag:
-    //    Work correctly with failure on failure scenarions, including on_demand restart
-    //    with lock is used and the 2nd failure occurs before the first restart process finished.
-    //        Tranditional serial shutdown - System was not opened while restart is going on
-    //        Tranditional serial shutdown - The cleanup() call stops all in-flight transactions
-    //                                                    without rolling back
-    //        Pure on-demand shutdown using commit_lsn - The cleanup() call stops all in-flight
-    //                                                    transactions without rolling back
-    //        Pure on-demand shutdown using locks - If the 2nd system crash occurs during
-    //                                                    Log Analysis, no issue
-    //                                                    Otherwise, the cleanup() call stops all in-flight
-    //                                                    transactions without rolling them back.
-    //                                                    If a user transaction has triggered an on_demand
-    //                                                    UNDO and it was in the middle of rolling back the
-    //                                                    loser transaction, potentially there might be other
-    //                                                    blocked user transactions due to lock conflicts,
-    //                                                    and the 2nd system crash occurred, note at this
-    //                                                    point no log record generated for all user transactions
-    //                                                    bloced on lock conflicts.
-    //                                                    During 2nd restart backward log scan Log Analysis
-    //                                                    phase, all lock re-acquisions should succeed without
-    //                                                    conflicts because the previously blocked user
-    //                                                    transactions did not generate log records therefore
-    //                                                    no lock re-acquisition and nothing to rollback
-    //        Mixed mode using locks - Same as 'pure on-demand shutdown using locks'
-    //
-    // Genuine system crash:
-    //    Similar to simulated system crash, it should work correctly with on_demand restart using lock.
-    //        Pure on-demand shutdown using locks - If the 2nd system crash occurs during
-    //                                                    Log Analysis, no issue
-    //                                                    Otherwise, if system crashed before the entire
-    //                                                    on-demand REDO/UNDO finished, and if a user
-    //                                                    transaction triggered UNDO was in the middle of
-    //                                                    rolling back (which blocked the associated user transaction)
-    //                                                    when the system crash occurred, then the lock
-    //                                                    re-acquisition process during 2nd restart should not
-    //                                                    encounter lock conflict because the previously blocked
-    //                                                    user transaction did not generate log record for its
-    //                                                    blocked operation, therefore no lock re-acquision and
-    //                                                    nothing to rollback
-    //        Mixed mode using locks - Same as 'pure on-demand shutdown using locks'
-}
-
-void ss_m::_set_recovery_mode()
-{
-    // For Instant Restart testing purpose
-    // which internal restart mode to use?  Default to serial restart (M1) if not specified
-
-    int32_t restart_mode = _options.get_int_option("sm_restart", 1 /*default value*/);
-    if (1 == restart_mode)
-    {
-        // Caller did not specify restart mode, use default (serial mode)
-        smlevel_0::restart_internal_mode = (smlevel_0::restart_internal_mode_t)m1_default_restart;
-    }
-    else
-    {
-        // Set caller specified restart mode
-        smlevel_0::restart_internal_mode = (smlevel_0::restart_internal_mode_t)restart_mode;
-    }
+    ERROUT(<< "[" << timer.time_ms() << "] Finished SM initialization");
 }
 
 ss_m::~ss_m()
@@ -854,28 +386,31 @@ ss_m::~ss_m()
 void
 ss_m::_destruct_once()
 {
-    FUNC(ss_m::~ss_m);
-
     --_instance_cnt;
 
     if (_instance_cnt)  {
-        if(errlog) {
-            errlog->clog << warning_prio << "ss_m::~ss_m() : \n"
-             << "\twarning --- destructor called more than once\n"
-             << "\tignored" << flushl;
-        } else {
-            cerr << "ss_m::~ss_m() : \n"
-             << "\twarning --- destructor called more than once\n"
-             << "\tignored" << endl;
-        }
+        cerr << "ss_m::~ss_m() : \n"
+            << "\twarning --- destructor called more than once\n"
+            << "\tignored" << endl;
         return;
     }
 
+    // CS TODO: get rid of this shutting_down flag, or at least use proper fences.
     // Set shutting_down so that when we disable bg flushing, if the
     // log flush daemon is running, it won't just try to re-activate it.
     shutting_down = true;
 
-    _finish_recovery();
+    // get rid of all non-prepared transactions
+    // First... disassociate me from any tx
+    if(xct()) {
+        me()->detach_xct(xct());
+    }
+
+    ERROUT(<< "Terminating recovery manager");
+    if (recovery) {
+        delete recovery;
+        recovery = 0;
+    }
 
     // now it's safe to do the clean_up
     // The code for distributed txn (prepared xcts has been deleted, the input paramter
@@ -887,83 +422,44 @@ ss_m::_destruct_once()
     bool truncate = _options.get_bool_option("sm_truncate_log", false);
     if (shutdown_clean || truncate) {
         ERROUT(<< "SM performing clean shutdown");
-        // dismount all volumes which aren't locked by a prepared xct
-        // We can't use normal dismounting for the prepared xcts because
-        // they would be logged as dismounted. We need to dismount them
-        // w/o logging turned on.
-        // That happens below.
 
-        W_COERCE( bf->force_all() );
+        W_COERCE(log->flush_all());
+        bf->get_cleaner()->wakeup(true);
         me()->check_actual_pin_count(0);
 
-        // take a clean checkpoints with the volumes which need
-        // to be remounted and the prepared xcts
-        // Note that this force_until_lsn will do a direct bpool scan
-        // with serial writes since the background flushing has been
-        // disabled
-        if(log) bf->force_until_lsn(log->curr_lsn());
+        // Force alloc and stnode pages
+        lsn_t dur_lsn = smlevel_0::log->durable_lsn();
+        W_COERCE(vol->get_alloc_cache()->write_dirty_pages(dur_lsn));
+        W_COERCE(vol->get_stnode_cache()->write_page(dur_lsn));
 
-        // Take a synch checkpoint (blocking) after buffer pool flush but before shutting down
-        chkpt->synch_take();
-        chkpt->retire_chkpt_thread();
-
-        delete chkpt; chkpt = 0;
+        chkpt->take();
 
         if (truncate) {
             W_COERCE(_truncate_log());
         }
+
+        ERROUT(<< "All pages cleaned successfully");
     }
     else {
-        DBGTHRD(<< "SM performing dirty shutdown");
-        chkpt->retire_chkpt_thread();
+        ERROUT(<< "SM performing dirty shutdown");
 
-        delete chkpt; chkpt = 0;
     }
-
-
-    // this should come before xct and log shutdown so that any
-    // ongoing restore has a chance to finish cleanly. Should also come after
-    // shutdown of buffer, since forcing the buffer requires the volume.
-    vol->shutdown(!shutdown_clean);
-    delete vol; vol = 0; // io manager
+    delete chkpt; chkpt = 0;
 
     nprepared = xct_t::cleanup(true /* now dispose of prepared xcts */);
     w_assert1(nprepared == 0);
     w_assert1(xct_t::num_active_xcts() == 0);
 
+    ERROUT(<< "Terminating other services");
     lm->assert_empty(); // no locks should be left
-
-    /*
-     *  Level 2
-     */
     bt->destruct_once();
     delete bt; bt = 0; // btree manager
-
-    /*
-     *  Level 1
-     */
-
-
-    // delete the lock manager
     delete lm; lm = 0;
 
+    ERROUT(<< "Terminating log archiver");
     if (logArchiver) {
         logArchiver->shutdown();
-        delete logArchiver;
-        logArchiver = 0;
     }
-
-    if (_ticker) {
-        _ticker->shutdown();
-        _ticker->join();
-        delete _ticker;
-    }
-
-    if(log) {
-        log->shutdown(); // log joins any subsidiary threads
-        // We do not delete the log now; shutdown takes care of that. delete log;
-    }
-    log = 0;
 
 #ifndef USE_ATOMIC_COMMIT // otherwise clog and log point to the same object
     if(clog) {
@@ -972,269 +468,59 @@ ss_m::_destruct_once()
 #endif
     clog = 0;
 
-    W_COERCE(bf->destroy());
-    delete bf; bf = 0; // destroy buffer manager last because io/dev are flushing them!
-    delete bk; bk = 0;
 
-    /*
-     *  Level 0
-     */
-    if (errlog) {
-        delete errlog; errlog = 0;
+    ERROUT(<< "Terminating buffer manager");
+    bf->shutdown();
+    delete bf; bf = 0; // destroy buffer manager last because io/dev are flushing them!
+
+    if(logArchiver) {
+        delete logArchiver; // LL: decoupled cleaner in bf still needs archiver
+        logArchiver = 0;    //     so we delete it only after bf is gone
     }
 
-    /*
-     *  free buffer pool memory
-     */
+    ERROUT(<< "Terminating volume");
+    // this should come before xct and log shutdown so that any
+    // ongoing restore has a chance to finish cleanly. Should also come after
+    // shutdown of buffer, since forcing the buffer requires the volume.
+    // destroy() will stop cleaners
+    vol->shutdown(!shutdown_clean);
+    delete vol; vol = 0; // io manager
+
+    ERROUT(<< "Terminating log manager");
+    if(log) {
+        log->shutdown();
+        delete log;
+    }
+    log = 0;
+
      w_rc_t        e;
      char        *unused;
      e = smthread_t::set_bufsize(0, unused);
      if (e.is_error())  {
         cerr << "ss_m: Warning: set_bufsize(0):" << endl << e << endl;
      }
+
+     ERROUT(<< "SM shutdown complete!");
 }
 
-#include "logdef_gen.cpp" // required to regenerate chkpt_end
-
-/*
- * WARNING: this method assumes that all transaction activity has stopped.
- */
-rc_t ss_m::_truncate_log(bool ignore_chkpt)
+rc_t ss_m::_truncate_log()
 {
     DBGTHRD(<< "Truncating log on LSN " << log->durable_lsn());
-    /*
-     * Take contents from last checkpoint until the end of the log file and
-     * copy them into a new log file, deleting all older files.
-     */
-    lsn_t master = log->master_lsn();
-    lsn_t min_chkpt = log->min_chkpt_rec_lsn();
-    // When this fails, it means either that some pages were not written
-    // out prior to the last checkpoint (min rec_lsn of all CB's on buffer)
-    // or that some transactions are still active
-    w_assert0(ignore_chkpt || master == min_chkpt);
 
-    int partition = master.hi();
-    size_t offset = master.lo();
+    W_DO(log->flush_all());
+    W_DO(log->truncate());
+    W_DO(log->flush_all());
 
-    const char* logdir = log->dir_name();
-    stringstream ss;
-    int new_part = partition + 1;
-    ss << logdir << '/' << log_storage::log_prefix() << new_part << ends;
-    string newLogFile = ss.str();
-
-    ss.seekp(0);
-    ss << logdir << '/' << log_storage::log_prefix() << partition << ends;
-    string oldLogFile = ss.str();
-
-    int flags = smthread_t::OPEN_RDONLY;
-    int oldFd, newFd;
-    W_DO(me()->open(oldLogFile.c_str(), flags, 0744, oldFd));
-
-    flags = smthread_t::OPEN_WRONLY | smthread_t::OPEN_TRUNC
-        | smthread_t::OPEN_CREATE | smthread_t::OPEN_SYNC;
-    W_DO(me()->open(newLogFile.c_str(), flags, 0744, newFd));
-
-    char* buf = new char[partition_t::XFERSIZE];
-    int done = 0;
-    W_DO(me()->pread_short(oldFd, buf, partition_t::XFERSIZE, offset, done));
-
-    lsn_t newPartLSN = lsn_t(new_part, 0);
-    lsn_t newEndLSN = lsn_t(new_part, 0);
-
-    // fix LSN of all log records
-    size_t pos = 0;
-    while (true) {
-        logrec_t* lr = (logrec_t*) (buf + pos);
-        lsn_t newLSN(new_part, pos);
-        pos += lr->length();
-        w_assert0(lr->length() > 0);
-        memcpy(buf + pos - sizeof(lsn_t), &newLSN, sizeof(lsn_t));
-        if (lr->type() == logrec_t::t_skip) {
-            newEndLSN = lsn_t(new_part, pos - lr->length());
-            break;
-        }
-        if (lr->type() == logrec_t::t_chkpt_end) {
-            // rebuild with correct fields
-            new (lr) chkpt_end_log(newLSN, newPartLSN, newPartLSN);
-        }
-    }
-
-    W_DO(me()->pwrite(newFd, buf, partition_t::XFERSIZE, 0));
-
-    W_DO(me()->close(oldFd));
-    W_DO(me()->close(newFd));
-    delete[] buf;
-
-    // Wait for archiver
-    if (logArchiver) {
-        logArchiver->setEager(false);
-        while (logArchiver->getNextConsumedLSN() < newEndLSN) {
-            logArchiver->activate(newEndLSN);
-            ::usleep(10000); // 10ms
-        }
-        logArchiver->requestFlushSync(newEndLSN);
-        logArchiver->shutdown();
-
-        // generate empty run to fill hole of new partition
-        W_DO(logArchiver->getDirectory()->closeCurrentRun(newEndLSN));
-        delete logArchiver;
-        logArchiver = NULL;
-    }
-
-
-    while (partition > 0) {
-        ss.seekp(0);
-        ss << logdir << '/' << log_storage::log_prefix() << partition << ends;
-        string file = ss.str();
-        unlink(file.c_str());
-        partition--;
-    }
-
-    // delete old chk file and create new one
-    ss.seekp(0);
-    ss << logdir << '/' << log_storage::master_prefix() << 'v'
-        << log_storage::_version_major << '.'
-        << log_storage::_version_minor << '_'
-        << master << '_' << master << ends;
-    unlink(ss.str().c_str());
-
-    ss.seekp(0);
-    ss << logdir << '/' << log_storage::master_prefix() << 'v'
-        << log_storage::_version_major << '.'
-        << log_storage::_version_minor << '_'
-        << new_part << ".0" << '_'
-        << new_part << ".0" << ends;
-    W_DO(me()->open(ss.str().c_str(), flags, 0644, newFd));
-    W_DO(me()->close(newFd));
+    // this should be an "empty" checkpoint
+    chkpt->take();
+    log->get_storage()->delete_old_partitions();
 
     return RCOK;
 }
 
 void ss_m::set_shutdown_flag(bool clean)
 {
-    // shutdown_clean = clean;
-}
-
-// Debugging function
-// Returns true if restart is still going on
-// Serial restart mode: always return false
-// Concurrent restart mode: return true if concurrent restart
-//                                          (REDO and UNDO) is active
-bool ss_m::in_restart()
-{
-    // This function can be called only after the system is opened
-    // therefore the system is not in recovery when running in serial recovery mode
-
-    if (true == smlevel_0::use_serial_restart())
-    {
-        return false;
-    }
-    else if (recovery)
-    {
-        // The restart object exists and we are not using serial mode
-        return recovery->restart_in_progress();
-    }
-    else
-    {
-        w_assert1(false == smlevel_0::use_serial_restart());
-
-        // Restart object does not exist, this can happen if the system
-        // was started from an empty database and nothing to recover
-
-        return false;
-    }
-}
-
-// Debugging function
-// Returns the status of the specified restart phase
-restart_phase_t ss_m::in_log_analysis()
-{
-    if (true == smlevel_0::use_serial_restart())
-    {
-        // If in serial mode, by time time caller calls this function
-        // we are done with restart already
-        return t_restart_phase_done;
-    }
-    else if (recovery)
-    {
-        // System is opened after Log Analysis phase
-        // If we have the restart object, are we still in Log Analysis?
-        if (true == smlevel_0::in_recovery_analysis())
-            return t_restart_phase_active;
-        else
-            return t_restart_phase_done;
-    }
-    else
-    {
-        // Restart object does not exist
-        return t_restart_phase_done;
-    }
-}
-
-// Debugging function
-// Returns the status of the specified restart phase
-restart_phase_t ss_m::in_REDO()
-{
-    if (true == smlevel_0::use_serial_restart())
-    {
-        // If in serial mode, by time time caller calls this function
-        // we are done with restart already
-        return t_restart_phase_done;
-    }
-    else if (recovery)
-    {
-        // System is opened after Log Analysis phase
-        // If we have the restart object, are we still in REDO?
-
-        // If pure on-demand REDO, we don't know where we are
-        if (true == smlevel_0::use_redo_demand_restart())
-            return t_restart_phase_unknown;
-
-        // If concurrent REDO (M2 or M4)
-        if (true == recovery->redo_in_progress())
-            return t_restart_phase_active;  // In REDO
-        else
-            return t_restart_phase_done;    // Done with REDO
-    }
-    else
-    {
-        // Restart object does not exist
-        return t_restart_phase_done;
-    }
-}
-
-// Debugging function
-// Returns the status of the specified restart phase
-restart_phase_t ss_m::in_UNDO()
-{
-    if (true == smlevel_0::use_serial_restart())
-    {
-        // If in serial mode, by time time caller calls this function
-        // we are done with restart already
-        return t_restart_phase_done;
-    }
-    else if (recovery)
-    {
-        // System is opened after Log Analysis phase
-        // If we have the restart object, are we still in UNDO?
-
-        // If pure on-demand REDO, we don't know where we are
-        if (true == smlevel_0::use_undo_demand_restart())
-            return t_restart_phase_unknown;
-
-        // If concurrent REDO (M2 or M4)
-        if (true == recovery->undo_in_progress())
-            return t_restart_phase_active;       // In UNDO
-        else if (true == recovery->redo_in_progress())
-            return t_restart_phase_not_active;   // Still in REDO
-        else
-            return t_restart_phase_done;         // Done with UNDO
-    }
-    else
-    {
-        // Restart object does not exist
-        return t_restart_phase_done;
-    }
+    shutdown_clean = clean;
 }
 
 
@@ -1252,7 +538,6 @@ ss_m::begin_xct(
         sm_stats_info_t*             _stats, // allocated by caller
         timeout_in_ms timeout)
 {
-    SM_PROLOGUE_RC(ss_m::begin_xct, not_in_xct, read_only,  0);
     tid_t tid;
     W_DO(_begin_xct(_stats, tid, timeout));
     return RCOK;
@@ -1260,7 +545,6 @@ ss_m::begin_xct(
 rc_t
 ss_m::begin_xct(timeout_in_ms timeout)
 {
-    SM_PROLOGUE_RC(ss_m::begin_xct, not_in_xct, read_only,  0);
     tid_t tid;
     W_DO(_begin_xct(0, tid, timeout));
     return RCOK;
@@ -1272,7 +556,6 @@ ss_m::begin_xct(timeout_in_ms timeout)
 rc_t
 ss_m::begin_xct(tid_t& tid, timeout_in_ms timeout)
 {
-    SM_PROLOGUE_RC(ss_m::begin_xct, not_in_xct,  read_only, 0);
     W_DO(_begin_xct(0, tid, timeout));
     return RCOK;
 }
@@ -1293,10 +576,8 @@ rc_t
 ss_m::commit_xct(sm_stats_info_t*& _stats, bool lazy,
                  lsn_t* plastlsn)
 {
-    SM_PROLOGUE_RC(ss_m::commit_xct, commitable_xct, read_write, 0);
 
     W_DO(_commit_xct(_stats, lazy, plastlsn));
-    prologue.no_longer_in_xct();
 
     return RCOK;
 }
@@ -1325,11 +606,9 @@ ss_m::commit_xct_group(xct_t *list[], int listlen)
 rc_t
 ss_m::commit_xct(bool lazy, lsn_t* plastlsn)
 {
-    SM_PROLOGUE_RC(ss_m::commit_xct, commitable_xct, read_write, 0);
 
     sm_stats_info_t*             _stats=0;
     W_DO(_commit_xct(_stats,lazy,plastlsn));
-    prologue.no_longer_in_xct();
     /*
      * throw away the _stats, since user isn't harvesting...
      */
@@ -1344,22 +623,17 @@ ss_m::commit_xct(bool lazy, lsn_t* plastlsn)
 rc_t
 ss_m::abort_xct(sm_stats_info_t*&             _stats)
 {
-    SM_PROLOGUE_RC(ss_m::abort_xct, abortable_xct, read_write, 0);
 
     // Temp removed for debugging purposes only
     // want to see what happens if the abort proceeds (scripts/alloc.10)
-    bool was_sys_xct = xct() && xct()->is_sys_xct();
+    // bool was_sys_xct = xct() && xct()->is_sys_xct();
     W_DO(_abort_xct(_stats));
-    if (!was_sys_xct) { // system transaction might be nested
-        prologue.no_longer_in_xct();
-    }
 
     return RCOK;
 }
 rc_t
 ss_m::abort_xct()
 {
-    SM_PROLOGUE_RC(ss_m::abort_xct, abortable_xct, read_write, 0);
     sm_stats_info_t*             _stats=0;
 
     W_DO(_abort_xct(_stats));
@@ -1367,7 +641,6 @@ ss_m::abort_xct()
      * throw away _stats, since user is not harvesting them
      */
     delete _stats;
-    prologue.no_longer_in_xct();
 
     return RCOK;
 }
@@ -1381,7 +654,6 @@ ss_m::save_work(sm_save_point_t& sp)
     // For now, consider this a read/write operation since you
     // wouldn't be doing this unless you intended to write and
     // possibly roll back.
-    SM_PROLOGUE_RC(ss_m::save_work, in_xct, read_write, 0);
     W_DO( _save_work(sp) );
     return RCOK;
 }
@@ -1392,7 +664,6 @@ ss_m::save_work(sm_save_point_t& sp)
 rc_t
 ss_m::rollback_work(const sm_save_point_t& sp)
 {
-    SM_PROLOGUE_RC(ss_m::rollback_work, in_xct, read_write, 0);
     W_DO( _rollback_work(sp) );
     return RCOK;
 }
@@ -1440,31 +711,18 @@ ss_m::xct_state_t ss_m::state_xct(const xct_t* x)
     return x->state();
 }
 
-smlevel_0::fileoff_t ss_m::xct_log_space_needed()
-{
-    w_assert3(xct() != NULL);
-    return xct()->get_log_space_used();
-}
-
-rc_t ss_m::xct_reserve_log_space(fileoff_t amt) {
-    w_assert3(xct() != NULL);
-    return xct()->wait_for_log_space(amt);
-}
-
 /*--------------------------------------------------------------*
  *  ss_m::chain_xct()                                *
  *--------------------------------------------------------------*/
 rc_t
 ss_m::chain_xct( sm_stats_info_t*&  _stats, bool lazy)
 {
-    SM_PROLOGUE_RC(ss_m::chain_xct, commitable_xct, read_write, 0);
     W_DO( _chain_xct(_stats, lazy) );
     return RCOK;
 }
 rc_t
 ss_m::chain_xct(bool lazy)
 {
-    SM_PROLOGUE_RC(ss_m::chain_xct, commitable_xct, read_write, 0);
     sm_stats_info_t        *_stats = 0;
     W_DO( _chain_xct(_stats, lazy) );
     /*
@@ -1472,12 +730,6 @@ ss_m::chain_xct(bool lazy)
      */
     delete _stats;
     return RCOK;
-}
-
-rc_t ss_m::flushlog() {
-    // forces until the current lsn
-    bf->force_until_lsn(log->curr_lsn());
-    return (RCOK);
 }
 
 /*--------------------------------------------------------------*
@@ -1488,20 +740,7 @@ rc_t
 ss_m::checkpoint()
 {
     // Just kick the chkpt thread
-    chkpt->wakeup_and_take();
-    return RCOK;
-}
-
-
-/*--------------------------------------------------------------*
- *  ss_m::checkpoint()
- *  For log buffer testing
- *--------------------------------------------------------------*/
-rc_t
-ss_m::checkpoint_sync()
-{
-    // Synch chekcpoint!
-    chkpt->synch_take();
+    chkpt->take();
     return RCOK;
 }
 
@@ -1512,14 +751,6 @@ ss_m::activate_archiver()
         logArchiver->activate(lsn_t::null, false);
     }
     return RCOK;
-}
-
-rc_t ss_m::force_buffers() {
-    return bf->force_all();
-}
-
-rc_t ss_m::force_volume(vid_t vol) {
-    return bf->force_volume(vol);
 }
 
 /*--------------------------------------------------------------*
@@ -1554,22 +785,6 @@ ss_m::config_info(sm_config_info_t& info) {
 
     info.logging  = (ss_m::log != 0);
 
-    return RCOK;
-}
-
-/*--------------------------------------------------------------*
- *  ss_m::start_log_corruption()                        *
- *--------------------------------------------------------------*/
-rc_t
-ss_m::start_log_corruption()
-{
-    SM_PROLOGUE_RC(ss_m::start_log_corruption, in_xct, read_write, 0);
-    if(log) {
-        // flush current log buffer since all future logs will be
-        // corrupted.
-        errlog->clog << emerg_prio << "Starting Log Corruption" << flushl;
-        log->start_log_corruption();
-    }
     return RCOK;
 }
 
@@ -1612,115 +827,21 @@ ss_m::get_durable_lsn(lsn_t& anlsn)
 }
 
 void ss_m::dump_page_lsn_chain(std::ostream &o) {
-    dump_page_lsn_chain(o, lpid_t::null, lsn_t::max);
+    dump_page_lsn_chain(o, 0, lsn_t::max);
 }
-void ss_m::dump_page_lsn_chain(std::ostream &o, const lpid_t &pid) {
+void ss_m::dump_page_lsn_chain(std::ostream &o, const PageID &pid) {
     dump_page_lsn_chain(o, pid, lsn_t::max);
 }
-void ss_m::dump_page_lsn_chain(std::ostream &o, const lpid_t &pid, const lsn_t &max_lsn) {
+void ss_m::dump_page_lsn_chain(std::ostream &o, const PageID &pid, const lsn_t &max_lsn) {
     // using static method since restart_m is not guaranteed to be active
     restart_m::dump_page_lsn_chain(o, pid, max_lsn);
 }
 
-/*--------------------------------------------------------------*
- *  DEVICE and VOLUME MANAGEMENT                        *
- *--------------------------------------------------------------*/
-
-rc_t
-ss_m::mount_vol(const char* path, vid_t& vid)
-{
-    SM_PROLOGUE_RC(ss_m::mount_vol, not_in_xct, read_only, 0);
-
-    spinlock_write_critical_section cs(&_begin_xct_mutex);
-
-    DBG(<<"mount_vol " << path);
-    cout<<path<<endl;
-
-    W_DO(vol->sx_mount(path));
-    vid = vol->get(path)->vid();
-
-    return RCOK;
-}
-
-rc_t
-ss_m::dismount_vol(const char* path)
-{
-    SM_PROLOGUE_RC(ss_m::mount_vol, not_in_xct, read_only, 0);
-
-    spinlock_write_critical_section cs(&_begin_xct_mutex);
-
-    DBG(<<"dismount_vol " << path);
-
-    W_DO(vol->sx_dismount(path));
-
-    return RCOK;
-}
-
-/*--------------------------------------------------------------*
- *  ss_m::get_device_quota()                            *
- *--------------------------------------------------------------*/
-rc_t
-ss_m::get_device_quota(const char* device, size_t& quota_KB, size_t& quota_used_KB)
-{
-    SM_PROLOGUE_RC(ss_m::get_device_quota, can_be_in_xct, read_only, 0);
-
-    vol_t* v = vol->get(device);
-    size_t page_size_kb = sizeof(generic_page) / 1024;
-    quota_used_KB = v->num_used_pages() * page_size_kb;
-    quota_KB = v->num_pages() * page_size_kb;
-    return RCOK;
-}
-
-/*--------------------------------------------------------------*
- *  ss_m::create_vol()                                *
- *--------------------------------------------------------------*/
-rc_t
-ss_m::create_vol(const char* dev_name, smksize_t quota_KB, vid_t& vid)
-{
-    SM_PROLOGUE_RC(ss_m::create_vol, not_in_xct, read_only, 0);
-
-    if(quota_KB > sthread_t::max_os_file_size / 1024) {
-        return RC(eDEVTOOLARGE);
-    }
-
-    spinlock_write_critical_section cs(&_begin_xct_mutex);
-
-    W_DO(vol->sx_format(dev_name,
-       shpid_t(quota_KB/(page_sz/1024)),
-       vid));
-
-    return RCOK;
-}
-
 rc_t ss_m::verify_volume(
-    vid_t vid, int hash_bits, verify_volume_result &result)
+    int hash_bits, verify_volume_result &result)
 {
-    W_DO(btree_m::verify_volume(vid, hash_bits, result));
+    W_DO(btree_m::verify_volume(hash_bits, result));
     return RCOK;
-}
-
-ostream& operator<<(ostream& o, const lpid_t& pid)
-{
-    return o << "p(" << pid.vol() << '.' << pid.page << ')';
-}
-
-istream& operator>>(istream& i, lpid_t& pid)
-{
-    char c[5];
-    memset(c, 0, sizeof(c));
-    i >> c[0]        // p
-        >> c[1]      // (
-        >> pid._vol  // vid
-        >> c[2]      // .
-        >> pid.page  // shpid
-        >> c[3];     // )
-    c[4] = '\0';
-    if (i)  {
-        if (strcmp(c, "p(.)")) {
-            i.clear(ios::badbit|i.rdstate());  // error
-        }
-    }
-    return i;
 }
 
 #if defined(__GNUC__) && __GNUC_MINOR__ > 6
@@ -1760,46 +881,6 @@ ss_m::dump_locks() {
 
 
 
-//#ifdef SLI_HOOKS
-/*--------------------------------------------------------------*
- *  Enable/Disable Shore-SM features                            *
- *--------------------------------------------------------------*/
-
-void ss_m::set_sli_enabled(bool /* enable */)
-{
-    fprintf(stdout, "SLI not supported\n");
-    //lm->set_sli_enabled(enable);
-    //TODO: SHORE-KITS-API
-    assert(0);
-}
-
-void ss_m::set_elr_enabled(bool /* enable */)
-{
-    fprintf(stdout, "ELR not supported\n");
-    //xct_t::set_elr_enabled(enable);
-    //TODO: SHORE-KITS-API
-    assert(0);
-}
-
-rc_t ss_m::set_log_features(char const* /* features */)
-{
-    fprintf(stdout, "Aether not integrated\n");
-    return (RCOK);
-    //return log->set_log_features(features);
-    //TODO: SHORE-KITS-API
-    assert(0);
-}
-
-char const* ss_m::get_log_features()
-{
-    fprintf(stdout, "Aether not integrated\n");
-    return ("NOT-IMPL");
-    //return log->get_log_features();
-    //TODO: SHORE-KITS-API
-    assert(0);
-}
-//#endif
-
 lil_global_table* ss_m::get_lil_global_table() {
     if (lm) {
         return lm->get_lil_global_table();
@@ -1811,37 +892,9 @@ lil_global_table* ss_m::get_lil_global_table() {
 rc_t ss_m::lock(const lockid_t& n, const okvl_mode& m,
            bool check_only, timeout_in_ms timeout)
 {
-    W_DO( lm->lock(n, m, false, check_only, timeout) );
+    W_DO( lm->lock(n.hash(), m, true, true, !check_only, NULL, timeout) );
     return RCOK;
 }
-
-
-/*--------------------------------------------------------------*
- *  ss_m::unlock()                                *
- *--------------------------------------------------------------*/
-/*rc_t
-ss_m::unlock(const lockid_t& n)
-{
-    SM_PROLOGUE_RC(ss_m::unlock, in_xct, read_only, 0);
-    W_DO( lm->unlock(n) );
-    return RCOK;
-}
-*/
-
-/*
-rc_t
-ss_m::query_lock(const lockid_t& n, lock_mode_t& m)
-{
-    SM_PROLOGUE_RC(ss_m::query_lock, in_xct, read_only, 0);
-    W_DO( lm->query(n, m, xct()->tid()) );
-
-    return RCOK;
-}
-*/
-
-/*****************************************************************
- * Internal/physical-ID version of all the storage operations
- *****************************************************************/
 
 /*--------------------------------------------------------------*
  *  ss_m::_begin_xct(sm_stats_info_t *_stats, timeout_in_ms timeout) *
@@ -1997,7 +1050,6 @@ ss_m::_commit_xct_group(xct_t *list[], int listlen)
          */
         me()->attach_xct(x);
         {
-        SM_PROLOGUE_RC(ss_m::mount_dev, commitable_xct, read_write, 0);
         W_DO( x->commit_as_group_member() );
         }
         w_assert1(me()->xct() == NULL);
@@ -2130,149 +1182,6 @@ ss_m::_rollback_work(const sm_save_point_t& sp)
     return RCOK;
 }
 
-/*--------------------------------------------------------------*
- *  ss_m::get_du_statistics()        DU DF
- *--------------------------------------------------------------*/
-rc_t
-ss_m::get_du_statistics(vid_t vid, sm_du_stats_t& du, bool audit)
-{
-    SM_PROLOGUE_RC(ss_m::get_du_statistics, in_xct, read_only, 0);
-    W_DO(_get_du_statistics(vid, du, audit));
-    return RCOK;
-}
-
-
-/*--------------------------------------------------------------*
- *  ss_m::get_du_statistics()        DU DF                    *
- *--------------------------------------------------------------*/
-rc_t
-ss_m::get_du_statistics(const stid_t& stid, sm_du_stats_t& du, bool audit)
-{
-    SM_PROLOGUE_RC(ss_m::get_du_statistics, in_xct, read_only, 0);
-    W_DO(_get_du_statistics(stid, du, audit));
-    return RCOK;
-}
-
-/*--------------------------------------------------------------*
- *  ss_m::_get_du_statistics()        DU DF                    *
- *--------------------------------------------------------------*/
-rc_t
-ss_m::_get_du_statistics( const stid_t& stpgid, sm_du_stats_t& du, bool audit)
-{
-    // TODO this should take S lock, not IS
-    lpid_t root_pid;
-    W_DO(open_store(stpgid, root_pid));
-
-    btree_stats_t btree_stats;
-    W_DO( bt->get_du_statistics(root_pid, btree_stats, audit));
-    if (audit) {
-        W_DO(btree_stats.audit());
-    }
-    du.btree.add(btree_stats);
-    du.btree_cnt++;
-    return RCOK;
-}
-
-
-/*--------------------------------------------------------------*
- *  ss_m::_get_du_statistics()  DU DF                           *
- *--------------------------------------------------------------*/
-rc_t
-ss_m::_get_du_statistics(vid_t vid, sm_du_stats_t& du, bool audit)
-{
-    /*
-     * Cannot call this during recovery, even for
-     * debugging purposes
-     */
-    if(smlevel_0::in_recovery()) {
-        return RCOK;
-    }
-    W_DO(lm->intent_vol_lock(vid, audit ? okvl_mode::S : okvl_mode::IS));
-    sm_du_stats_t new_stats;
-
-    /*********************************************************
-     * First get stats on all the special stores in the volume.
-     *********************************************************/
-
-    stid_t stid;
-
-    /**************************************************
-     * Now get stats on every other store on the volume
-     **************************************************/
-
-    rc_t rc;
-    // get du stats on every store
-    for (stid_t s(vid, 0); s.store < stnode_page_h::max; s.store++) {
-        DBG(<<"look at store " << s);
-
-        store_flag_t flags;
-        rc = vol->get(vid)->get_store_flags(s.store, flags);
-        if (rc.is_error()) {
-            if (rc.err_num() == eBADSTID) {
-                DBG(<<"skipping bad STID " << s );
-                continue;  // skip any stores that don't exist
-            } else {
-                return rc;
-            }
-        }
-        DBG(<<" getting stats for store " << s << " flags=" << flags);
-        rc = _get_du_statistics(s, new_stats, audit);
-        if (rc.is_error()) {
-            if (rc.err_num() == eBADSTID) {
-                DBG(<<"skipping large object or missing store " << s );
-                continue;  // skip any stores that don't show
-                           // up in the directory index
-                           // in this case it this means stores for
-                           // large object pages
-            } else {
-                return rc;
-            }
-        }
-        DBG(<<"end for loop with s=" << s );
-    }
-
-    if (audit) {
-        W_DO(new_stats.audit());
-    }
-    du.add(new_stats);
-
-    return RCOK;
-}
-
-
-
-/*--------------------------------------------------------------*
- *  ss_m::{enable,disable,set}_fake_disk_latency()              *
- *--------------------------------------------------------------*/
-rc_t
-ss_m::enable_fake_disk_latency(vid_t vid)
-{
-    SM_PROLOGUE_RC(ss_m::enable_fake_disk_latency, not_in_xct, read_only, 0);
-    vol_t* v = vol->get(vid);
-    if (!v) return RC(eBADVOL);
-    v->enable_fake_disk_latency();
-    return RCOK;
-}
-
-rc_t
-ss_m::disable_fake_disk_latency(vid_t vid)
-{
-    SM_PROLOGUE_RC(ss_m::disable_fake_disk_latency, not_in_xct, read_only, 0);
-    vol_t* v = vol->get(vid);
-    if (!v) return RC(eBADVOL);
-    v->disable_fake_disk_latency();
-    return RCOK;
-}
-
-rc_t
-ss_m::set_fake_disk_latency(vid_t vid, const int adelay)
-{
-    SM_PROLOGUE_RC(ss_m::set_fake_disk_latency, not_in_xct, read_only, 0);
-    vol_t* v = vol->get(vid);
-    if (!v) return RC(eBADVOL);
-    v->set_fake_disk_latency(adelay);
-    return RCOK;
-}
 
 /*--------------------------------------------------------------*
  *  ss_m::gather_xct_stats()                            *
@@ -2284,12 +1193,6 @@ ss_m::set_fake_disk_latency(vid_t vid, const int adelay)
 rc_t
 ss_m::gather_xct_stats(sm_stats_info_t& _stats, bool reset)
 {
-    // Use commitable_xct to ensure exactly 1 thread attached for
-    // clean collection of all stats,
-    // even those that read-only threads would increment.
-    //
-    SM_PROLOGUE_RC(ss_m::gather_xct_stats, commitable_xct, read_only, 0);
-
     w_assert3(xct() != 0);
     xct_t& x = *xct();
 
@@ -2426,102 +1329,6 @@ operator<<(ostream &o, const sm_stats_info_t &s)
 }
 
 
-/*--------------------------------------------------------------*
- *  ss_m::get_store_info()                            *
- *--------------------------------------------------------------*/
-rc_t
-ss_m::get_store_info(
-    const stid_t&           stpgid,
-    sm_store_info_t&        info)
-{
-    SM_PROLOGUE_RC(ss_m::get_store_info, in_xct, read_only, 0);
-    W_DO(_get_store_info(stpgid, info));
-    return RCOK;
-}
-
-
-ostream&
-operator<<(ostream& o, smlevel_0::sm_store_property_t p)
-{
-    if (p == smlevel_0::t_regular)                o << "regular";
-    if (p == smlevel_0::t_temporary)                o << "temporary";
-    if (p == smlevel_0::t_load_file)                o << "load_file";
-    if (p == smlevel_0::t_insert_file)                o << "insert_file";
-    if (p == smlevel_0::t_bad_storeproperty)        o << "bad_storeproperty";
-    if (p & !(smlevel_0::t_regular
-                | smlevel_0::t_temporary
-                | smlevel_0::t_load_file
-                | smlevel_0::t_insert_file
-                | smlevel_0::t_bad_storeproperty))  {
-        o << "unknown_property";
-        w_assert3(1);
-    }
-    return o;
-}
-
-ostream&
-operator<<(ostream& o, smlevel_0::store_flag_t flag) {
-    if (flag == smlevel_0::st_unallocated)  o << "|unallocated";
-    if (flag & smlevel_0::st_regular)       o << "|regular";
-    if (flag & smlevel_0::st_tmp)           o << "|tmp";
-    if (flag & smlevel_0::st_load_file)     o << "|load_file";
-    if (flag & smlevel_0::st_insert_file)   o << "|insert_file";
-    if (flag & smlevel_0::st_empty)         o << "|empty";
-    if (flag & !(smlevel_0::st_unallocated
-                | smlevel_0::st_regular
-                | smlevel_0::st_tmp
-                | smlevel_0::st_load_file
-                | smlevel_0::st_insert_file
-                | smlevel_0::st_empty))  {
-        o << "|unknown";
-        w_assert3(1);
-    }
-
-    return o << "|";
-}
-
-ostream&
-operator<<(ostream& o, const smlevel_0::store_operation_t op)
-{
-    const char *names[] = {"delete_store",
-                        "create_store",
-                        "set_deleting",
-                        "set_store_flags",
-                        "set_root"};
-
-    if (op <= smlevel_0::t_set_root)  {
-        return o << names[op];
-    }
-    // else:
-    w_assert3(1);
-    return o << "unknown";
-}
-
-ostream&
-operator<<(ostream& o, const smlevel_0::store_deleting_t value)
-{
-    const char *names[] = { "not_deleting_store",
-                        "deleting_store",
-                        "store_freeing_exts",
-                        "unknown_deleting"};
-
-    if (value <= smlevel_0::t_unknown_deleting)  {
-        return o << names[value];
-    }
-    // else:
-    w_assert3(1);
-    return o << "unknown_deleting_store_value";
-}
-
-rc_t
-ss_m::log_file_was_archived(const char * logfile)
-{
-    if(log) return log->file_was_archived(logfile);
-    // should be a programming error to get here!
-    return RCOK;
-}
-
-
 extern "C" {
 /* Debugger-callable functions to dump various SM tables. */
 
@@ -2546,23 +1353,4 @@ extern "C" {
         W_IGNORE(ss_m::dump_buffers(cout));
         cout << flush;
     }
-}
-
-/*
- * descend to io_m to check the disk containing the given volume
- */
-w_rc_t ss_m::dump_vol_store_info(const vid_t &vid)
-{
-    SM_PROLOGUE_RC(ss_m::dump_vol_store_info, in_xct, read_only,  0);
-    return vol->get(vid)->check_disk();
-}
-
-
-w_rc_t
-ss_m::log_message(const char * const msg)
-{
-    SM_PROLOGUE_RC(ss_m::log_message, in_xct, read_write,  0);
-    w_ostrstream out;
-    out <<  msg << ends;
-    return log_comment(out.c_str());
 }

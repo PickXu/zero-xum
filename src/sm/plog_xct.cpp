@@ -53,8 +53,6 @@ rc_t plog_xct_t::get_logbuf(logrec_t*& lr, int /* type */)
 rc_t plog_xct_t::give_logbuf(logrec_t* lr, const fixable_page_h* p,
                     const fixable_page_h* p2)
 {
-    FUNC(plog_xct_t::give_logbuf);
-
     if (p != NULL) {
         lr->set_page_prev_lsn(lsn_t::null);
         if (p2 != NULL) {
@@ -120,7 +118,8 @@ void plog_xct_t::_update_page_lsns(const fixable_page_h *page)
 {
     if (page != NULL) {
         lsn_t new_lsn = log->curr_lsn();
-        page->update_initial_and_last_lsn(new_lsn.advance(1));
+        new_lsn = new_lsn.advance(1);
+        page->update_page_lsn(new_lsn);
         //lsn_t old_lsn = page->lsn();
         //if (old_lsn == lsn_t::null) {
             //old_lsn = lsn_t(1,0);
@@ -133,7 +132,6 @@ void plog_xct_t::_update_page_lsns(const fixable_page_h *page)
             //lintel::unsafe::atomic_fetch_add(addr, 1);
             //w_assert1(page->lsn() > old_lsn);
         //}
-        page->set_dirty();
     }
 }
 
@@ -155,7 +153,7 @@ rc_t plog_xct_t::_abort()
             w_assert1(!lr->is_single_sys_xct());
             w_assert1(!lr->is_multi_page()); // All multi-page logs are SSX, so no UNDO.
 
-            lpid_t pid = lr->construct_pid();
+            PageID pid = lr->pid();
             fixable_page_h page;
 
             if (!lr->is_logical())
@@ -164,7 +162,9 @@ rc_t plog_xct_t::_abort()
                 DBGOUT3 (<<"physical UNDO.. which is not quite good");
                 // tentatively use fix_direct for this
                 // eventually all physical UNDOs should go away
-                W_DO(page.fix_direct(pid.vol(), pid.page, LATCH_EX));
+                // CS TODO fix_direct not supported anymore
+                w_assert0(false);
+                // W_DO(page.fix_direct(pid, LATCH_EX));
                 w_assert1(page.pid() == pid);
             }
 
@@ -273,20 +273,19 @@ rc_t plog_xct_t::_commit_nochains(uint32_t flags, lsn_t* /* plastlsn */)
 rc_t plog_xct_t::_update_page_cas(logrec_t* lr)
 {
     // decrement uncommitted counter on page and set PageLSN
-    if (!lr->null_pid()) {
+    // if (!lr->null_pid()) {
+    if (true) { // CS TODO
         // Later on, we need access to the control block, which the
-        // standard fix procedure does not provide. So for now we have 
+        // standard fix procedure does not provide. So for now we have
         // to use this hack, which is basically a "manual" fix.
         // Of course it would be much better if we could use a proper
         // fix method from fixable_page_h (TODO)
-        lpid_t pid = lr->construct_pid();
-        uint64_t key = bf_key(pid.vol(), pid.page);
-        uint16_t* uncommitted_cnt;
+        PageID pid = lr->pid();
         generic_page* page;
         latch_t* latch;
 
         while (true) {
-            bf_idx idx = smlevel_0::bf->lookup_in_doubt(key);
+            bf_idx idx = smlevel_0::bf->lookup(pid);
             if (idx == 0) {
                 // page needs to be fetched
                 // Instead of repeating the logic of the fix method once again,
@@ -294,16 +293,16 @@ rc_t plog_xct_t::_update_page_cas(logrec_t* lr)
                 // only to unfix it and fix it manually once again below.
                 // This is again a dirty hack, but at this point this penalty
                 // is acceptable because this event (a page being evicted with
-                // uncommitted updates) is avoided by the page cleaner, and 
+                // uncommitted updates) is avoided by the page cleaner, and
                 // even if we do that later, it should be quite rare.
                 fixable_page_h fetched_page;
-                W_DO(fetched_page.fix_direct(pid.vol(), pid.page, LATCH_SH,
-                            false, false));
+                // CS TODO fix_direct not supported anymore
+                w_assert0(false);
+                // W_DO(fetched_page.fix_direct(pid, LATCH_SH, false, false));
                 fetched_page.unfix();
                 continue;
             }
             bf_tree_cb_t& cb = smlevel_0::bf->get_cb(idx);
-            uncommitted_cnt = &cb._uncommitted_cnt;
             page = smlevel_0::bf->get_page(&cb);
 
             // Latch the page to prevent it being evicted.
@@ -314,7 +313,7 @@ rc_t plog_xct_t::_update_page_cas(logrec_t* lr)
 
             // After latching, we have to re-check if the page was not replaced
             // while we performed the lookup and waited for the latch.
-            if (cb._pid_shpid == pid.page) {
+            if (cb._pid == pid) {
                 break;
             }
         }
@@ -336,21 +335,23 @@ rc_t plog_xct_t::_update_page_cas(logrec_t* lr)
             // protocol. The old "lsn" field is still used by the standard
             // commit protocol. The former flushes log records to clog,
             // while the latter to the standard log.
-            lsndata_t old_value = page->clsn.data();
+            // CS TODO
+            lsndata_t old_value = page->lsn.data();
             // Some other transaction may have already incremented the LSN
             // to a larger value, which means we have nothing to do, as the
             // page is already in a newer state.
             if (new_value > old_value)
             {
-                if (!lintel::unsafe::atomic_compare_exchange_strong(
-                            reinterpret_cast<lsndata_t*>(&page->clsn),
-                            &old_value,
-                            new_value))
-                {
-                    continue; // CAS did not succeed -> try again
-                }
-                DBGOUT3(<< "Updated CLSN of " << pid
-                        << " to " << (lsn_t) new_value);
+                // CS TODO
+                // if (!lintel::unsafe::atomic_compare_exchange_strong(
+                //             reinterpret_cast<lsndata_t*>(&page->clsn),
+                //             &old_value,
+                //             new_value))
+                // {
+                //     continue; // CAS did not succeed -> try again
+                // }
+                // DBGOUT3(<< "Updated CLSN of " << pid
+                //         << " to " << (lsn_t) new_value);
             }
             else {
                 DBGOUT3(<< "CLSN of " << pid << " not updated! "
@@ -364,7 +365,8 @@ rc_t plog_xct_t::_update_page_cas(logrec_t* lr)
 
         // Decrement counter of uncommitted updates. Must also
         // be done atomically since page is latched in shared mode
-        lintel::unsafe::atomic_fetch_sub(uncommitted_cnt, 1);
+        // CS TODO
+        // lintel::unsafe::atomic_fetch_sub(uncommitted_cnt, 1);
 
         latch->latch_release();
     }

@@ -148,10 +148,10 @@ public:
     /** total count of pages checked (includes checks of same page). */
     int32_t pages_checked;
     /** ID of pages that had some inconsistency. */
-    std::set<shpid_t> pids_inconsistent;
+    std::set<PageID> pids_inconsistent;
 
     /** expected next page id. */
-    shpid_t next_pid;
+    PageID next_pid;
     /** expected next page level. -1 means "don't check" (only for root page). */
     int16_t next_level;
     /** expected next fence-low key. */
@@ -167,10 +167,10 @@ public:
  */
 class stid_list_elem_t  {
     public:
-    stid_t        stid;
+    StoreID        stid;
     w_link_t    _link;
 
-    stid_list_elem_t(const stid_t& theStid)
+    stid_list_elem_t(const StoreID& theStid)
         : stid(theStid)
         {};
     ~stid_list_elem_t()
@@ -248,18 +248,6 @@ public:
         state_t                   _state;
         bool                      _read_only;
 
-        /*
-         * List of stores which this xct will free after completion
-         * Protected by _1thread_xct.
-         */
-        w_list_t<stid_list_elem_t,queue_based_lock_t>    _storesToFree;
-
-        /*
-         * List of load stores:  converted to regular on xct commit,
-         *                act as a temp files during xct
-         */
-        w_list_t<stid_list_elem_t,queue_based_lock_t>    _loadStores;
-
         lintel::Atomic<int> _xct_ended; // used for self-checking (assertions) only
         bool              _xct_aborting; // distinguish abort()ing xct from
         // commit()ing xct when they are in state xct_freeing_space
@@ -315,10 +303,6 @@ public:
 
     friend ostream&             operator<<(ostream&, const xct_t&);
 
-    static int                  collect(vtable_t&, bool names_too);
-    void                        vtable_collect(vtable_row_t &);
-    static void                 vtable_collect_names(vtable_row_t &);
-
     state_t                     state() const;
     void                        set_timeout(timeout_in_ms t) ;
 
@@ -373,8 +357,6 @@ public:
     const lsn_t&                first_lsn() const;
     const lsn_t&                undo_nxt() const;
     const logrec_t*             last_log() const;
-    fileoff_t                   get_log_space_used() const;
-    rc_t                        wait_for_log_space(fileoff_t amt);
 
     // used by restart, chkpt among others
     static xct_t*               look_up(const tid_t& tid);
@@ -457,8 +439,8 @@ public:
     //
     //        Used by I/O layer
     //
-    void                        AddStoreToFree(const stid_t& stid);
-    void                        AddLoadStore(const stid_t& stid);
+    void                        AddStoreToFree(const StoreID& stid);
+    void                        AddLoadStore(const StoreID& stid);
     //        Used by vol.cpp
     void                        set_alloced() { }
 
@@ -613,11 +595,7 @@ public:
     void                         acquire_1thread_xct_mutex() const; // serialize
     void                         release_1thread_xct_mutex() const; // concurrency ok
     bool                         is_1thread_log_mutex_mine() const {
-                                    return
-                                        me()->is_update_thread()
-                                        ||
-                                        smlevel_0::in_recovery()
-                                        ;
+                                    return me()->is_update_thread();
     }
 
 private:
@@ -626,14 +604,14 @@ private:
         // remove the 1thread log mutex altogether; given that,
         // we assert that there is one and only one update thread
         // and that thread is us.
-        w_assert0(me()->is_update_thread() || smlevel_0::in_recovery());
+        w_assert0(me()->is_update_thread());
     }
     void                         release_1thread_log_mutex() {
         // This is a sanity check: we want to
         // remove the 1thread log mutex altogether; given that,
         // we assert that there is one and only one update thread
         // and that thread is us.
-        w_assert0(me()->is_update_thread() || smlevel_0::in_recovery());
+        w_assert0(me()->is_update_thread());
     }
 private:
     bool                         is_1thread_xct_mutex_mine() const;
@@ -659,13 +637,6 @@ private:
     void                        _compensate(const lsn_t&, bool undoable = false);
 
 public:
-    void                        ClearAllStoresToFree();
-    void                        FreeAllStoresToFree();
-    void                        DumpStoresToFree();
-    rc_t                        ConvertAllLoadStoresToRegularStores();
-    void                        ClearAllLoadStores();
-
-
     bool                        is_piggy_backed_single_log_sys_xct() const { return _piggy_backed_single_log_sys_xct;}
     void                        set_piggy_backed_single_log_sys_xct(bool enabled) { _piggy_backed_single_log_sys_xct = enabled;}
 
@@ -803,20 +774,7 @@ protected: // all data members protected
      */
     logrec_t*                    _log_buf_for_piggybacked_ssx;
 
-    /* track log space needed to avoid wedging the transaction in the
-       event of an abort due to full log
-     */
-    fileoff_t                    _log_bytes_rsvd; // reserved for rollback
-    fileoff_t                    _log_bytes_ready; // avail for insert/reserv
-    fileoff_t                    _log_bytes_used; // total used by the xct
-    fileoff_t                    _log_bytes_used_fwd; // used by the xct in
-                                 // forward activity (including partial
-                                 // rollbacks) -- ONLY for assertions/debugging
-    fileoff_t                    _log_bytes_reserved_space;//requested from
-                                 // log -- used ONLY for assertions/debugging
     bool                         _rolling_back;// true if aborting OR
-                                 // in rollback_work (which does not change
-                                 // the xct state).
 
     bool                         should_consume_rollback_resv(int t) const;
     bool                         should_reserve_for_rollback(int t)
