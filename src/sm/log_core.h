@@ -80,8 +80,6 @@ class fetch_buffer_loader_t;
 #include "tatas.h"
 #include "log_storage.h"
 
-//xum
-#include <zmq.hpp>
 
 class log_core
 {
@@ -123,10 +121,6 @@ public:
 
     rc_t load_fetch_buffers();
     void discard_fetch_buffers();
-
-    //xum
-    zmq::context_t    _context;
-    zmq::socket_t     _publisher;
 
 
     // log buffer segment size = 128 MB
