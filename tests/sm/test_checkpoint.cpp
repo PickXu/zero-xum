@@ -48,6 +48,20 @@ lsn_t makeUpdate(unsigned tid, PageID pid, string kstr)
     return lsn;
 }
 
+<<<<<<< HEAD
+=======
+lsn_t logDummy()
+{
+    lsn_t lsn;
+    string empty("");
+    logrec_t* lr = new (&logrec) comment_log(empty.c_str());
+    W_COERCE(smlevel_0::log->insert(*lr, &lsn));
+    flushLog();
+
+    return lsn;
+}
+
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
 lsn_t commitXct(unsigned tid)
 {
     lsn_t lsn;
@@ -93,7 +107,10 @@ rc_t emptyChkpt(ss_m*, test_volume_t*)
     EXPECT_EQ(0, chkpt.buf_tab.size());
     EXPECT_EQ(0, chkpt.xct_tab.size());
     EXPECT_TRUE(chkpt.bkp_path.empty());
+<<<<<<< HEAD
     EXPECT_TRUE(!chkpt.get_begin_lsn().is_null());
+=======
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
     EXPECT_TRUE(chkpt.get_highest_tid().is_null());
     EXPECT_TRUE(chkpt.get_min_rec_lsn().is_null());
     EXPECT_TRUE(chkpt.get_min_xct_lsn().is_null());
@@ -111,7 +128,10 @@ rc_t oneUpdateDirtyUncommitted(ss_m*, test_volume_t*)
     EXPECT_EQ(1, chkpt.buf_tab.size());
     EXPECT_EQ(1, chkpt.xct_tab.size());
     EXPECT_TRUE(chkpt.bkp_path.empty());
+<<<<<<< HEAD
     EXPECT_TRUE(!chkpt.get_begin_lsn().is_null());
+=======
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
     EXPECT_EQ(tid_t(1,0), chkpt.get_highest_tid());
     EXPECT_EQ(lsn, chkpt.get_min_rec_lsn());
     EXPECT_EQ(lsn, chkpt.get_min_xct_lsn());
@@ -130,7 +150,10 @@ rc_t twoUpdatesDirtyUncommitted(ss_m*, test_volume_t*)
     EXPECT_EQ(1, chkpt.buf_tab.size());
     EXPECT_EQ(1, chkpt.xct_tab.size());
     EXPECT_TRUE(chkpt.bkp_path.empty());
+<<<<<<< HEAD
     EXPECT_TRUE(!chkpt.get_begin_lsn().is_null());
+=======
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
     EXPECT_EQ(tid_t(1,0), chkpt.get_highest_tid());
     EXPECT_EQ(lsn1, chkpt.get_min_rec_lsn());
     EXPECT_EQ(lsn1, chkpt.get_min_xct_lsn());
@@ -152,7 +175,10 @@ rc_t twoUpdatesDirtyCommitted(ss_m*, test_volume_t*)
     EXPECT_EQ(1, chkpt.buf_tab.size());
     EXPECT_EQ(0, chkpt.xct_tab.size());
     EXPECT_TRUE(chkpt.bkp_path.empty());
+<<<<<<< HEAD
     EXPECT_TRUE(!chkpt.get_begin_lsn().is_null());
+=======
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
     EXPECT_EQ(tid_t(1,0), chkpt.get_highest_tid());
     EXPECT_EQ(lsn1, chkpt.get_min_rec_lsn());
     EXPECT_EQ(lsn_t::null, chkpt.get_min_xct_lsn());
@@ -174,7 +200,10 @@ rc_t twoUpdatesDirtyAborting(ss_m*, test_volume_t*)
     EXPECT_EQ(1, chkpt.buf_tab.size());
     EXPECT_EQ(1, chkpt.xct_tab.size());
     EXPECT_TRUE(chkpt.bkp_path.empty());
+<<<<<<< HEAD
     EXPECT_TRUE(!chkpt.get_begin_lsn().is_null());
+=======
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
     EXPECT_EQ(tid_t(1,0), chkpt.get_highest_tid());
     EXPECT_EQ(lsn1, chkpt.get_min_rec_lsn());
     EXPECT_EQ(lsn1, chkpt.get_min_xct_lsn());
@@ -199,7 +228,10 @@ rc_t twoUpdatesDirtyAborted(ss_m*, test_volume_t*)
     EXPECT_EQ(1, chkpt.buf_tab.size());
     EXPECT_EQ(0, chkpt.xct_tab.size());
     EXPECT_TRUE(chkpt.bkp_path.empty());
+<<<<<<< HEAD
     EXPECT_TRUE(!chkpt.get_begin_lsn().is_null());
+=======
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
     EXPECT_EQ(tid_t(1,0), chkpt.get_highest_tid());
     EXPECT_EQ(lsn1, chkpt.get_min_rec_lsn());
     EXPECT_EQ(lsn_t::null, chkpt.get_min_xct_lsn());
@@ -223,7 +255,10 @@ rc_t twoXcts(ss_m*, test_volume_t*)
     EXPECT_EQ(4, chkpt.buf_tab.size());
     EXPECT_EQ(2, chkpt.xct_tab.size());
     EXPECT_TRUE(chkpt.bkp_path.empty());
+<<<<<<< HEAD
     EXPECT_TRUE(!chkpt.get_begin_lsn().is_null());
+=======
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
     EXPECT_EQ(tid_t(2,0), chkpt.get_highest_tid());
     EXPECT_EQ(lsn1, chkpt.get_min_rec_lsn());
     EXPECT_EQ(lsn1, chkpt.get_min_xct_lsn());
@@ -251,7 +286,10 @@ rc_t twoXctsOneCommitted(ss_m*, test_volume_t*)
     EXPECT_EQ(4, chkpt.buf_tab.size());
     EXPECT_EQ(1, chkpt.xct_tab.size());
     EXPECT_TRUE(chkpt.bkp_path.empty());
+<<<<<<< HEAD
     EXPECT_TRUE(!chkpt.get_begin_lsn().is_null());
+=======
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
     EXPECT_EQ(tid_t(2,0), chkpt.get_highest_tid());
     EXPECT_EQ(lsn1, chkpt.get_min_rec_lsn());
     EXPECT_EQ(lsn1, chkpt.get_min_xct_lsn());
@@ -268,7 +306,11 @@ rc_t onePageClean(ss_m*, test_volume_t*)
 {
     lsn_t lsn1 = makeUpdate(1, 1, "key1");
     lsn_t lsn2 = makeUpdate(1, 2, "key2");
+<<<<<<< HEAD
     sysevent::log_page_write(2);
+=======
+    sysevent::log_page_write(1, lsn2);
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
     flushLog();
 
     chkpt_t chkpt;
@@ -277,11 +319,18 @@ rc_t onePageClean(ss_m*, test_volume_t*)
     EXPECT_EQ(1, chkpt.buf_tab.size());
     EXPECT_EQ(1, chkpt.xct_tab.size());
     EXPECT_TRUE(chkpt.bkp_path.empty());
+<<<<<<< HEAD
     EXPECT_TRUE(!chkpt.get_begin_lsn().is_null());
     EXPECT_EQ(tid_t(1,0), chkpt.get_highest_tid());
     EXPECT_EQ(lsn1, chkpt.get_min_rec_lsn());
     EXPECT_EQ(lsn1, chkpt.get_min_xct_lsn());
     EXPECT_EQ(lsn1, chkpt.buf_tab[1].page_lsn);
+=======
+    EXPECT_EQ(tid_t(1,0), chkpt.get_highest_tid());
+    EXPECT_EQ(lsn2, chkpt.get_min_rec_lsn());
+    EXPECT_EQ(lsn1, chkpt.get_min_xct_lsn());
+    EXPECT_EQ(lsn2, chkpt.buf_tab[2].page_lsn);
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
     EXPECT_EQ(lsn2, chkpt.xct_tab[tid_t(1,0)].last_lsn);
 
     return RCOK;
@@ -295,8 +344,13 @@ rc_t twoPagesCleanTwoDirty(ss_m*, test_volume_t*)
     lsn_t lsn4 = makeUpdate(1, 3, "key1");
     lsn_t lsn5 = makeUpdate(1, 4, "key1");
     lsn_t lsn6 = makeUpdate(1, 4, "key2");
+<<<<<<< HEAD
     sysevent::log_page_write(1);
     sysevent::log_page_write(3);
+=======
+    sysevent::log_page_write(1, lsn6);
+    sysevent::log_page_write(3, lsn6);
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
     flushLog();
 
     chkpt_t chkpt;
@@ -305,7 +359,10 @@ rc_t twoPagesCleanTwoDirty(ss_m*, test_volume_t*)
     EXPECT_EQ(2, chkpt.buf_tab.size());
     EXPECT_EQ(1, chkpt.xct_tab.size());
     EXPECT_TRUE(chkpt.bkp_path.empty());
+<<<<<<< HEAD
     EXPECT_TRUE(!chkpt.get_begin_lsn().is_null());
+=======
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
     EXPECT_EQ(tid_t(1,0), chkpt.get_highest_tid());
     EXPECT_EQ(lsn2, chkpt.get_min_rec_lsn());
     EXPECT_EQ(lsn1, chkpt.get_min_xct_lsn());
@@ -327,8 +384,13 @@ rc_t pagesDirtiedTwice(ss_m*, test_volume_t*)
     lsn_t lsn4 = makeUpdate(1, 3, "key1");
     lsn_t lsn5 = makeUpdate(1, 4, "key1");
     lsn_t lsn6 = makeUpdate(1, 4, "key2");
+<<<<<<< HEAD
     sysevent::log_page_write(1);
     sysevent::log_page_write(3);
+=======
+    sysevent::log_page_write(1, lsn6);
+    sysevent::log_page_write(3, lsn6);
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
 
     lsn_t lsn7 = makeUpdate(1, 1, "key2");
 
@@ -338,12 +400,19 @@ rc_t pagesDirtiedTwice(ss_m*, test_volume_t*)
     EXPECT_EQ(3, chkpt.buf_tab.size());
     EXPECT_EQ(1, chkpt.xct_tab.size());
     EXPECT_TRUE(chkpt.bkp_path.empty());
+<<<<<<< HEAD
     EXPECT_TRUE(!chkpt.get_begin_lsn().is_null());
+=======
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
     EXPECT_EQ(tid_t(1,0), chkpt.get_highest_tid());
     EXPECT_EQ(lsn2, chkpt.get_min_rec_lsn());
     EXPECT_EQ(lsn1, chkpt.get_min_xct_lsn());
     EXPECT_EQ(lsn7, chkpt.buf_tab[1].page_lsn);
+<<<<<<< HEAD
     EXPECT_EQ(lsn7, chkpt.buf_tab[1].page_lsn);
+=======
+    EXPECT_EQ(lsn7, chkpt.buf_tab[1].rec_lsn);
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
     EXPECT_EQ(lsn3, chkpt.buf_tab[2].page_lsn);
     EXPECT_EQ(lsn2, chkpt.buf_tab[2].rec_lsn);
     EXPECT_EQ(lsn6, chkpt.buf_tab[4].page_lsn);
@@ -354,12 +423,54 @@ rc_t pagesDirtiedTwice(ss_m*, test_volume_t*)
     return RCOK;
 }
 
+<<<<<<< HEAD
+=======
+rc_t cleanerLostUpdate(ss_m*, test_volume_t*)
+{
+    // Update before page_write log record but after the last update
+    // captured by the cleaner
+    makeUpdate(1, 1, "key1");
+    makeUpdate(1, 2, "key1");
+
+    // Add dummy update so clean page is identified correctly.
+    // This is needed because when the clean_lsn is equal to the
+    // page_lsn in chkpt_t, the page is treated as dirty to be
+    // on the safe side.
+    lsn_t lsn3 = logDummy();
+
+    // This update is on that the page_write logrec will miss
+    lsn_t lsn4 = makeUpdate(1, 2, "key2");
+
+    // Cleaner missed LSN 3
+    sysevent::log_page_write(1, lsn3);
+    sysevent::log_page_write(2, lsn3);
+    flushLog();
+
+    chkpt_t chkpt;
+    chkpt.scan_log();
+
+    // Page 2 must be seen as dirty
+    EXPECT_EQ(1, chkpt.buf_tab.size());
+    EXPECT_EQ(lsn4, chkpt.get_min_rec_lsn());
+    EXPECT_TRUE(chkpt.buf_tab.find(2) != chkpt.buf_tab.end());
+    EXPECT_EQ(lsn4, chkpt.buf_tab[2].page_lsn);
+    EXPECT_EQ(lsn4, chkpt.buf_tab[2].rec_lsn);
+
+    return RCOK;
+}
+
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
 #define DFT_TEST(name) \
 TEST (CheckpointTest, name) { \
     test_env->empty_logdata_dir(); \
     init(); \
     sm_options options; \
+<<<<<<< HEAD
     options.set_bool_option("sm_testenv_init_vol", true); \
+=======
+    options.set_bool_option("sm_format", true); \
+    options.set_bool_option("sm_shutdown_clean", false); \
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
     EXPECT_EQ(test_env->runBtreeTest(name, options), 0); \
 }
 
@@ -374,6 +485,10 @@ DFT_TEST(twoXctsOneCommitted);
 DFT_TEST(onePageClean);
 DFT_TEST(twoPagesCleanTwoDirty);
 DFT_TEST(pagesDirtiedTwice);
+<<<<<<< HEAD
+=======
+DFT_TEST(cleanerLostUpdate);
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

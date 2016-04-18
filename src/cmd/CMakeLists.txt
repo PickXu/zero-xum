@@ -26,7 +26,7 @@ add_executable(zapps main.cpp)
 
 set(zapps_LIBS
     # zapps components
-    base
+    zapps_base
     kits
     restore
     loginspect
@@ -43,3 +43,4 @@ set(zapps_LIBS
 )
 
 target_link_libraries(zapps ${zapps_LIBS} common)
+

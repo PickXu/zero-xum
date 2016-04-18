@@ -15,13 +15,10 @@
 #include "sm_base.h"
 #include "stnode_page.h"
 #include "vol.h"
-#include "sm_du_stats.h"
+#include "log_core.h"
 #include "sm_options.h"
 
-#include "sm_vtable_enum.h"
-
 #include "alloc_cache.h"
-#include "bf_tree.h"
 #include "restore.h"
 #include "logarchiver.h"
 #include "eventlog.h"
@@ -40,14 +37,13 @@ vol_t::vol_t(const sm_options& options, chkpt_t* chkpt_info)
                _failed(false),
                _restore_mgr(NULL), _dirty_pages(NULL), _backup_fd(-1),
                _current_backup_lsn(lsn_t::null), _backup_write_fd(-1),
-               _log_page_reads(false), _log_page_writes(false)
+               _log_page_reads(false)
 {
     string dbfile = options.get_string_option("sm_dbfile", "db");
-    cout << "[VOL] sm_dbfile: "<< dbfile << endl;
     bool truncate = options.get_bool_option("sm_format", false);
     _readonly = options.get_bool_option("sm_vol_readonly", false);
     _log_page_reads = options.get_bool_option("sm_vol_log_reads", false);
-    _log_page_writes = options.get_bool_option("sm_vol_log_writes", true);
+    _use_o_direct = options.get_bool_option("sm_vol_o_direct", false);
 
     spinlock_write_critical_section cs(&_mutex);
 
@@ -112,6 +108,8 @@ void vol_t::delete_dirty_page(PageID pid)
 {
     if (!_dirty_pages) { return; }
 
+    spinlock_write_critical_section cs(&_mutex);
+
     buf_tab_t::iterator it = _dirty_pages->find(pid);
     if (it != _dirty_pages->end()) {
         _dirty_pages->erase(it);
@@ -123,8 +121,10 @@ rc_t vol_t::open_backup()
     // mutex held by caller -- no concurrent backup being added
     string backupFile = _backups.back();
     // Using direct I/O
-    int open_flags = smthread_t::OPEN_RDONLY | smthread_t::OPEN_SYNC
-        | smthread_t::OPEN_DIRECT;
+    int open_flags = smthread_t::OPEN_RDONLY | smthread_t::OPEN_SYNC;
+    if (_use_o_direct) {
+        open_flags |= smthread_t::OPEN_DIRECT;
+    }
     W_DO(me()->open(backupFile.c_str(), open_flags, 0666, _backup_fd));
     w_assert0(_backup_fd > 0);
     _current_backup_lsn = _backup_lsns.back();
@@ -138,7 +138,7 @@ lsn_t vol_t::get_backup_lsn()
     return _current_backup_lsn;
 }
 
-rc_t vol_t::mark_failed(bool evict, bool redo)
+rc_t vol_t::mark_failed(bool /*evict*/, bool redo)
 {
     spinlock_write_critical_section cs(&_mutex);
 
@@ -163,6 +163,11 @@ rc_t vol_t::mark_failed(bool evict, bool redo)
     // open backup file -- may already be open due to new backup being taken
     if (useBackup && _backup_fd < 0) {
         W_DO(open_backup());
+    }
+
+    if (!ss_m::logArchiver) {
+        throw runtime_error("Cannot simulate restore with mark_failed \
+                without a running log archiver");
     }
 
     _restore_mgr = new RestoreMgr(ss_m::get_options(),
@@ -239,37 +244,25 @@ bool vol_t::check_restore_finished()
         }
 
         // close restore manager
-        _restore_mgr->shutdown();
+        if (_restore_mgr->try_shutdown()) {
+            // join should be immediate, since thread is not running
+            _restore_mgr->join();
+            delete _restore_mgr;
+            _restore_mgr = NULL;
 
-        delete _restore_mgr;
-        _restore_mgr = NULL;
+            // close backup file
+            if (_backup_fd > 0) {
+                W_COERCE(me()->close(_backup_fd));
+                _backup_fd = -1;
+                _current_backup_lsn = lsn_t::null;
+            }
 
-        // close backup file
-        if (_backup_fd > 0) {
-            W_COERCE(me()->close(_backup_fd));
-            _backup_fd = -1;
-            _current_backup_lsn = lsn_t::null;
+            set_failed(false);
+            return true;
         }
-
-        set_failed(false);
-        return true;
     }
-}
 
-inline void vol_t::check_metadata_restored() const
-{
-    /* During restore, we must wait for shpid 0 to be restored.  Even though it
-     * is not an actual pid restored in log replay, the log records of store
-     * operations have pid 0, and they must be restored first so that the
-     * stnode cache is restored.  See RestoreMgr::restoreMetadata()
-     *
-     * All operations that access metadata, i.e., allocations, store
-     * operations, and root page ids, must wait for metadata to be restored
-     */
-    if (is_failed()) {
-        w_assert1(_restore_mgr);
-        _restore_mgr->waitUntilRestored(PageID(0));
-    }
+    return false;
 }
 
 void vol_t::redo_segment_restore(unsigned segment)
@@ -554,7 +547,11 @@ rc_t vol_t::read_many_pages(PageID first_page, generic_page* const buf, int cnt,
             return RC(eVOLFAILED);
         }
         else {
-            { // pin avoids restore mgr being destructed while we access it
+            {
+                // Pin avoids restore mgr being destructed while we access it.
+                // If it returns false, then restore manager was terminated,
+                // which implies that restore process is done and we can safely
+                // read the volume
                 spinlock_read_critical_section cs(&_mutex);
                 if (!_restore_mgr->pin()) { break; }
             }
@@ -579,6 +576,7 @@ rc_t vol_t::read_many_pages(PageID first_page, generic_page* const buf, int cnt,
                         if (_log_page_reads) {
                             sysevent::log_page_read(first_page + i);
                         }
+                        _restore_mgr->unpin();
                         return RCOK;
                     }
                 }
@@ -814,10 +812,6 @@ rc_t vol_t::write_many_pages(PageID first_page, const generic_page* const buf, i
     fake_disk_latency(start);
     ADD_TSTAT(vol_blks_written, cnt);
     INC_TSTAT(vol_writes);
-
-    if (_log_page_writes) {
-        sysevent::log_page_write(first_page, cnt);
-    }
 
     return RCOK;
 }

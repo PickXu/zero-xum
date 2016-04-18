@@ -22,13 +22,11 @@ class chkpt_restore_tab_t;
 class vol_t
 {
 public:
-    vol_t(const sm_options&, chkpt_t* chkpt_info);
+    vol_t(const sm_options&, chkpt_t* chkpt_info = nullptr);
     virtual ~vol_t();
 
     void shutdown(bool abrupt);
 
-    // CS TODO
-    PageID     first_data_pageid() const { return 0; }
     size_t      num_used_pages() const;
 
     alloc_cache_t*           get_alloc_cache() {return _alloc_cache;}
@@ -60,7 +58,8 @@ public:
      * to the given EMLSN (expected minimum LSN). If that's the case, invoke
      * single-page recovery to restore page to its most recent state.
      */
-    rc_t read_page_verify(PageID pnum, generic_page* const buf, lsn_t emlsn);
+    rc_t read_page_verify(PageID pnum, generic_page* const buf,
+            lsn_t emlsn = lsn_t::null);
 
     rc_t                read_many_pages(
         PageID             first_page,
@@ -142,6 +141,8 @@ public:
     /** Method to create _alloc_cache and _stnode_cache */
     void build_caches(bool truncate);
 
+    bool caches_ready() { return _alloc_cache && _stnode_cache; }
+
 private:
     // variables read from volume header -- remain constant after mount
     int              _unix_fd;
@@ -186,13 +187,15 @@ private:
     int _backup_write_fd;
     string _backup_write_path;
 
-    /** Whether to generate page read/write log records */
+    /** Whether to generate page read log records */
     bool _log_page_reads;
-    bool _log_page_writes;
 
     /** Buffer to create restore_begin lorec manually
      *  (128 bytes are enough since it contains only vid) */
     char _logrec_buf[128];
+
+    /** Whether to open file with O_DIRECT */
+    bool _use_o_direct;
 
     rc_t dismount(bool abrupt = false);
 
@@ -208,9 +211,6 @@ private:
 
     lsn_t get_dirty_page_emlsn(PageID pid) const;
     void delete_dirty_page(PageID pid);
-
-    /** If media failure happened, wait for metadata to be restored */
-    void check_metadata_restored() const;
 };
 
 inline bool vol_t::is_valid_store(StoreID f) const

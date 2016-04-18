@@ -33,6 +33,7 @@
 
 // #include "k_defines.h"
 #include "sm_vas.h"
+#include "log_core.h"
 
 #include <map>
 
@@ -355,7 +356,6 @@ protected:
 
     // CS: parameters removed from envVar/shore.conf/SHORE_*_OPTIONS
     bool _clobber;
-    string _device;
     //xum
     string _log_port;
 
@@ -537,7 +537,6 @@ public:
     //    void set_max_cpu_count(const int maxcpucnt);
 
     void set_clobber(bool c) { _clobber = c; }
-    void set_device(string d) { _device = d; }
     void set_loaders(int l) { _loaders_to_use = l; }
 
     // --- scaling and querying factor --- //

@@ -25,9 +25,6 @@
 #include "sm_base.h"
 #include "srwlock.h"
 
-// log buffer
-#include "logbuf_common.h"
-
 #include "../nullbuf.h"
 #if W_DEBUG_LEVEL <= 3
 nullbuf null_obj;
@@ -303,12 +300,15 @@ void btree_test_env::empty_dir(const char *folder_name)
 
 void btree_test_env::SetUp()
 {
-#ifdef LOG_DIRECT_IO
+    //char tests_dir[MAXPATHLEN] = "/dev/shm/";
     char tests_dir[MAXPATHLEN] = "/var/tmp/";
+<<<<<<< HEAD
 #else
     //char tests_dir[MAXPATHLEN] = "/dev/shm/";
     char tests_dir[MAXPATHLEN] = "/var/tmp/";
 #endif
+=======
+>>>>>>> e2c66849f4af1627f418ae7d2b4738ef11231265
     strcat(tests_dir, getenv("USER"));
     assure_dir(tests_dir);
     strcat(tests_dir, "/btree_test_env");

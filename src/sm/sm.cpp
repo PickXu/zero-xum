@@ -61,20 +61,12 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 #define SM_SOURCE
 #define SM_C
 
-#ifdef __GNUG__
-class prologue_rc_t;
-#endif
-
 #include "w.h"
 #include "sm_base.h"
 #include "chkpt.h"
-#include "chkpt_serial.h"
 #include "sm.h"
-#include "sm_vtable_enum.h"
-#include "prologue.h"
 #include "vol.h"
 #include "bf_tree.h"
-#include "crash.h"
 #include "restart.h"
 #include "sm_options.h"
 #include "suppress_unused.h"
@@ -83,18 +75,13 @@ class prologue_rc_t;
 #include "log_lsn_tracker.h"
 #include "bf_tree.h"
 #include "stopwatch.h"
+#include "alloc_cache.h"
 
 #include "allocator.h"
 #include "plog_xct.h"
-#include "logbuf_common.h"
 #include "log_core.h"
-#include "logbuf_core.h"
 #include "eventlog.h"
 
-
-#ifdef EXPLICIT_TEMPLATE
-template class w_auto_delete_t<SmStoreMetaStats*>;
-#endif
 
 bool         smlevel_0::shutdown_clean = false;
 bool         smlevel_0::shutting_down = false;
@@ -115,8 +102,6 @@ bool        smlevel_0::do_prefetch = false;
 
 bool        smlevel_0::statistics_enabled = true;
 
-smlevel_0::fileoff_t        smlevel_0::chkpt_displacement = 0;
-
 /*
  * _being_xct_mutex: Used to prevent xct creation during volume dismount.
  * Its sole purpose is to be sure that we don't have transactions
@@ -131,14 +116,11 @@ static srwlock_t          _begin_xct_mutex;
 BackupManager* smlevel_0::bk = 0;
 vol_t* smlevel_0::vol = 0;
 bf_tree_m* smlevel_0::bf = 0;
-log_m* smlevel_0::log = 0;
+log_core* smlevel_0::log = 0;
 log_core* smlevel_0::clog = 0;
 LogArchiver* smlevel_0::logArchiver = 0;
 
 lock_m* smlevel_0::lm = 0;
-
-ErrLog*            smlevel_0::errlog;
-
 
 char smlevel_0::zero_page[page_sz];
 
@@ -247,36 +229,9 @@ ss_m::_construct_once()
     smthread_t::init_fingerprint_map();
 
     if (_instance_cnt++)  {
-        // errlog might not be null since in this case there was another instance.
-        if(errlog) {
-            errlog->clog << fatal_prio
-            << "ss_m cannot be instantiated more than once"
-             << flushl;
-        }
+        cerr << "ss_m cannot be instantiated more than once" << endl;
         W_FATAL_MSG(eINTERNAL, << "instantiating sm twice");
     }
-
-    /*
-     *  Level 0
-     */
-    errlog = new ErrLog("ss_m", log_to_unix_file, _options.get_string_option("sm_errlog", "-").c_str());
-    if(!errlog) {
-        W_FATAL(eOUTOFMEMORY);
-    }
-
-
-    std::string error_loglevel = _options.get_string_option("sm_errlog_level", "error");
-    errlog->setloglevel(ErrLog::parse(error_loglevel.c_str()));
-    ///////////////////////////////////////////////////////////////
-    // Henceforth, all errors can go to ss_m::errlog thus:
-    // ss_m::errlog->clog << XXX_prio << ... << flushl;
-    // or
-    // ss_m::errlog->log(log_XXX, "format...%s..%d..", s, n); NB: no newline
-    ///////////////////////////////////////////////////////////////
-#if W_DEBUG_LEVEL > 0
-	// just to be sure errlog is working
-	errlog->clog << debug_prio << "Errlog up and running." << flushl;
-#endif
 
     w_assert1(page_sz >= 1024);
 
@@ -289,12 +244,15 @@ ss_m::_construct_once()
         shutdown_clean = true;
     }
 
+    //xum:20160414
+    /*
     ERROUT(<< "[" << timer.time_ms() << "] Initializing buffer manager");
 
     bf = new bf_tree_m(_options);
     if (! bf) {
         W_FATAL(eOUTOFMEMORY);
     }
+    */
 
     ERROUT(<< "[" << timer.time_ms() << "] Initializing lock manager");
 
@@ -309,15 +267,7 @@ ss_m::_construct_once()
      *  Level 1
      */
 #ifndef USE_ATOMIC_COMMIT // otherwise, log and clog will point to the same log object
-    std::string logimpl = _options.get_string_option("sm_log_impl", log_core::IMPL_NAME);
-    if (logimpl == logbuf_core::IMPL_NAME) {
-        log = new logbuf_core(_options);
-    }
-    else { // traditional
-        log = new log_core(_options);
-    }
-
-    cout << "LOG IMPL: " << logimpl << endl;
+    log = new log_core(_options);
     ERROUT(<< "[" << timer.time_ms() << "] Initializing log manager (part 2)");
     W_COERCE(log->init());
 #else
@@ -330,6 +280,8 @@ ss_m::_construct_once()
     w_assert0(log);
 #endif
 
+    //xum:20160414
+    /*
     ERROUT(<< "[" << timer.time_ms() << "] Initializing log archiver");
 
     // LOG ARCHIVER
@@ -366,6 +318,108 @@ ss_m::_construct_once()
 
     // start buffer pool cleaner when the log module is ready
     W_COERCE(bf->init(_options));
+    */
+
+    ERROUT(<< "[" << timer.time_ms() << "] Initializing log archiver");
+
+    //xum: 20160414
+    /*
+    chkpt = new chkpt_m(_options);
+    if (! chkpt)  {
+        W_FATAL(eOUTOFMEMORY);
+    }
+
+    SSM = this;
+    */
+    // LOG ARCHIVER
+    bool archiving = _options.get_bool_option("sm_archiving", false);
+    if (archiving) {
+        logArchiver = new LogArchiver(_options);
+        logArchiver->fork();
+    }
+
+    ERROUT(<< "[" << timer.time_ms() << "] Initializing restart manager");
+
+    // Log analysis provides info required to initialize vol_t
+    recovery = new restart_m(_options);
+    recovery->log_analysis();
+    chkpt_t* chkpt_info = recovery->get_chkpt();
+
+    //xum:20160414
+    /*
+    do_prefetch = _options.get_bool_option("sm_prefetch", false);
+
+    ERROUT(<< "[" << timer.time_ms() << "] Performing offline recovery");
+
+    // If not using instant restart, perform log-based REDO before opening up
+    if (instantRestart) {
+        recovery->spawn_recovery_thread();
+    }
+    else {
+        if (_options.get_bool_option("sm_restart_log_based_redo", true)) {
+            recovery->redo_log_pass();
+        }
+        else {
+            recovery->redo_page_pass();
+        }
+        // metadata caches can only be constructed now
+        vol->build_caches(format);
+        // system now ready for UNDO
+        // CS TODO: can this be done concurrently by restart thread?
+        recovery->undo_pass();
+
+        log->discard_fetch_buffers();
+
+        // CS: added this for debugging, but consistency check fails
+        // even right after loading -- so it's not a recovery problem
+        // vector<StoreID> stores;
+        // vol->get_stnode_cache()->get_used_stores(stores);
+        // for (size_t i = 0; i < stores.size(); i++) {
+        //     bool consistent;
+        //     W_COERCE(ss_m::verify_index(stores[i], 31, consistent));
+        //     w_assert0(consistent);
+        // }
+    }
+
+    ERROUT(<< "[" << timer.time_ms() << "] Finished SM initialization");
+}
+
+void ss_m::_finish_recovery()
+{
+*/
+    bool instantRestart = _options.get_bool_option("sm_restart_instant", true);
+    bool format = _options.get_bool_option("sm_format", false);
+
+    ERROUT(<< "[" << timer.time_ms() << "] Initializing volume manager");
+
+    // If not instant restart, pass null dirty page table, which disables REDO
+    // recovery based on SPR so that it is done explicitly by restart_m below.
+    vol = new vol_t(_options,
+            instantRestart ? chkpt_info : NULL);
+
+    ERROUT(<< "[" << timer.time_ms() << "] Initializing buffer manager");
+
+    bf = new bf_tree_m(_options);
+    if (! bf) {
+        W_FATAL(eOUTOFMEMORY);
+    }
+
+    ERROUT(<< "[" << timer.time_ms() << "] Building volume manager caches");
+
+    if (instantRestart) {
+        vol->build_caches(format);
+    }
+
+    // Initialize cleaner once vol caches are built
+    int cleaner_int = _options.get_int_option("sm_cleaner_interval", 0);
+    if (cleaner_int >= 0) {
+        // Getter will initialize cleaner on demand
+        bf->get_cleaner();
+    }
+
+    smlevel_0::statistics_enabled = _options.get_bool_option("sm_statistics", true);
+
+    ERROUT(<< "[" << timer.time_ms() << "] Initializing buffer cleaner and other services");
 
     bt = new btree_m;
     if (! bt) {
@@ -419,10 +473,6 @@ ss_m::_construct_once()
     ERROUT(<< "[" << timer.time_ms() << "] Finished SM initialization");
 }
 
-void ss_m::_finish_recovery()
-{
-}
-
 ss_m::~ss_m()
 {
     // This looks like a candidate for pthread_once(), but then smsh
@@ -440,15 +490,9 @@ ss_m::_destruct_once()
     --_instance_cnt;
 
     if (_instance_cnt)  {
-        if(errlog) {
-            errlog->clog << warning_prio << "ss_m::~ss_m() : \n"
-             << "\twarning --- destructor called more than once\n"
-             << "\tignored" << flushl;
-        } else {
-            cerr << "ss_m::~ss_m() : \n"
-             << "\twarning --- destructor called more than once\n"
-             << "\tignored" << endl;
-        }
+        cerr << "ss_m::~ss_m() : \n"
+            << "\twarning --- destructor called more than once\n"
+            << "\tignored" << endl;
         return;
     }
 
@@ -476,10 +520,12 @@ ss_m::_destruct_once()
     (void) nprepared; // Used only for debugging assert
 
     // log truncation requires clean shutdown
-    bool format = _options.get_bool_option("sm_format", false);
-    if (shutdown_clean || format) {
+    bool truncate = _options.get_bool_option("sm_truncate_log", false);
+    if (shutdown_clean || truncate) {
         ERROUT(<< "SM performing clean shutdown");
 
+	//xum:20160414
+	/*
         W_COERCE(bf->force_volume());
         W_COERCE(log->flush_all());
         me()->check_actual_pin_count(0);
@@ -491,6 +537,22 @@ ss_m::_destruct_once()
         // Take a synch checkpoint (blocking) after buffer pool flush but before shutting down
         chkpt->take();
 
+	*/
+        W_COERCE(log->flush_all());
+        bf->get_cleaner()->wakeup(true);
+        me()->check_actual_pin_count(0);
+
+        // Force alloc and stnode pages
+        lsn_t dur_lsn = smlevel_0::log->durable_lsn();
+        W_COERCE(vol->get_alloc_cache()->write_dirty_pages(dur_lsn));
+        W_COERCE(vol->get_stnode_cache()->write_page(dur_lsn));
+
+        chkpt->take();
+
+        if (truncate) {
+            W_COERCE(_truncate_log());
+        }
+
         ERROUT(<< "All pages cleaned successfully");
     }
     else {
@@ -499,6 +561,8 @@ ss_m::_destruct_once()
     }
     delete chkpt; chkpt = 0;
 
+    //xum:20160414
+    /*
     ERROUT(<< "Terminating volume");
     // this should come before xct and log shutdown so that any
     // ongoing restore has a chance to finish cleanly. Should also come after
@@ -507,6 +571,7 @@ ss_m::_destruct_once()
     W_COERCE(bf->destroy());
     vol->shutdown(!shutdown_clean);
     delete vol; vol = 0; // io manager
+    */
 
     nprepared = xct_t::cleanup(true /* now dispose of prepared xcts */);
     w_assert1(nprepared == 0);
@@ -523,13 +588,15 @@ ss_m::_destruct_once()
         logArchiver->shutdown();
     }
 
+    //xum:20160414
+    /*
     ERROUT(<< "Terminating log manager");
     if(log) {
         log->shutdown(); // log joins any subsidiary threads
         // We do not delete the log now; shutdown takes care of that. delete log;
     }
     log = 0;
-
+    */
 #ifndef USE_ATOMIC_COMMIT // otherwise clog and log point to the same object
     if(clog) {
         clog->shutdown(); // log joins any subsidiary threads
@@ -539,6 +606,7 @@ ss_m::_destruct_once()
 
 
     ERROUT(<< "Terminating buffer manager");
+    bf->shutdown();
     delete bf; bf = 0; // destroy buffer manager last because io/dev are flushing them!
 
     if(logArchiver) {
@@ -546,9 +614,20 @@ ss_m::_destruct_once()
         logArchiver = 0;    //     so we delete it only after bf is gone
     }
 
-    if (errlog) {
-        delete errlog; errlog = 0;
+    ERROUT(<< "Terminating volume");
+    // this should come before xct and log shutdown so that any
+    // ongoing restore has a chance to finish cleanly. Should also come after
+    // shutdown of buffer, since forcing the buffer requires the volume.
+    // destroy() will stop cleaners
+    vol->shutdown(!shutdown_clean);
+    delete vol; vol = 0; // io manager
+
+    ERROUT(<< "Terminating log manager");
+    if(log) {
+        log->shutdown();
+        delete log;
     }
+    log = 0;
 
      w_rc_t        e;
      char        *unused;
@@ -560,125 +639,17 @@ ss_m::_destruct_once()
      ERROUT(<< "SM shutdown complete!");
 }
 
-#include "logdef_gen.cpp" // required to regenerate chkpt_end
-
-/*
- * WARNING: this method assumes that all transaction activity has stopped.
- */
-rc_t ss_m::_truncate_log(bool ignore_chkpt)
+rc_t ss_m::_truncate_log()
 {
     DBGTHRD(<< "Truncating log on LSN " << log->durable_lsn());
 
+    W_DO(log->flush_all());
     W_DO(log->truncate());
     W_DO(log->flush_all());
 
-# if 0
-    /*
-     * Take contents from last checkpoint until the end of the log file and
-     * copy them into a new log file, deleting all older files.
-     */
-    lsn_t master = log->master_lsn();
-    lsn_t min_chkpt = log->min_chkpt_rec_lsn();
-    // When this fails, it means either that some pages were not written
-    // out prior to the last checkpoint (min rec_lsn of all CB's on buffer)
-    // or that some transactions are still active
-    w_assert0(ignore_chkpt || master == min_chkpt);
-
-    int partition = master.hi();
-    size_t offset = master.lo();
-
-    const char* logdir = log->dir_name();
-    stringstream ss;
-    int new_part = partition + 1;
-    ss << logdir << '/' << log_storage::log_prefix() << new_part << ends;
-    string newLogFile = ss.str();
-
-    ss.seekp(0);
-    ss << logdir << '/' << log_storage::log_prefix() << partition << ends;
-    string oldLogFile = ss.str();
-
-    int flags = smthread_t::OPEN_RDONLY;
-    int oldFd, newFd;
-    W_DO(me()->open(oldLogFile.c_str(), flags, 0744, oldFd));
-
-    flags = smthread_t::OPEN_WRONLY | smthread_t::OPEN_TRUNC
-        | smthread_t::OPEN_CREATE | smthread_t::OPEN_SYNC;
-    W_DO(me()->open(newLogFile.c_str(), flags, 0744, newFd));
-
-    char* buf = new char[partition_t::XFERSIZE];
-    int done = 0;
-    W_DO(me()->pread_short(oldFd, buf, partition_t::XFERSIZE, offset, done));
-
-    lsn_t newPartLSN = lsn_t(new_part, 0);
-    lsn_t newEndLSN = lsn_t(new_part, 0);
-
-    // fix LSN of all log records
-    // CS TODO: we wouldn't have to do this if logrecs were stored just with the low part
-    size_t pos = 0;
-    while (true) {
-        logrec_t* lr = (logrec_t*) (buf + pos);
-        lsn_t newLSN(new_part, pos);
-        pos += lr->length();
-        w_assert0(lr->length() > 0);
-        memcpy(buf + pos - sizeof(lsn_t), &newLSN, sizeof(lsn_t));
-        if (lr->type() == logrec_t::t_skip) {
-            newEndLSN = lsn_t(new_part, pos - lr->length());
-            break;
-        }
-        if (lr->type() == logrec_t::t_chkpt_end) {
-            // rebuild with correct fields
-            new (lr) chkpt_end_log(newLSN, newPartLSN, newPartLSN);
-        }
-    }
-
-    W_DO(me()->pwrite(newFd, buf, partition_t::XFERSIZE, 0));
-
-    W_DO(me()->close(oldFd));
-    W_DO(me()->close(newFd));
-    delete[] buf;
-
-    // Wait for archiver
-    if (logArchiver) {
-        logArchiver->setEager(false);
-        while (logArchiver->getNextConsumedLSN() < newEndLSN) {
-            logArchiver->activate(newEndLSN);
-            ::usleep(10000); // 10ms
-        }
-        logArchiver->requestFlushSync(newEndLSN);
-        logArchiver->shutdown();
-
-        // generate empty run to fill hole of new partition
-        W_DO(logArchiver->getDirectory()->closeCurrentRun(newEndLSN));
-        delete logArchiver;
-        logArchiver = NULL;
-    }
-
-
-    while (partition > 0) {
-        ss.seekp(0);
-        ss << logdir << '/' << log_storage::log_prefix() << partition << ends;
-        string file = ss.str();
-        unlink(file.c_str());
-        partition--;
-    }
-
-    // delete old chk file and create new one
-    ss.seekp(0);
-    ss << logdir << '/' << log_storage::master_prefix() << 'v'
-        << log_storage::_version_major << '.'
-        << log_storage::_version_minor << '_'
-        << master << '_' << master << ends;
-    unlink(ss.str().c_str());
-
-    ss.seekp(0);
-    ss << logdir << '/' << log_storage::master_prefix() << 'v'
-        << log_storage::_version_major << '.'
-        << log_storage::_version_minor << '_'
-        << new_part << ".0" << '_'
-        << new_part << ".0" << ends;
-    W_DO(me()->open(ss.str().c_str(), flags, 0644, newFd));
-    W_DO(me()->close(newFd));
-#endif
+    // this should be an "empty" checkpoint
+    chkpt->take();
+    log->get_storage()->delete_old_partitions();
 
     return RCOK;
 }
@@ -703,7 +674,6 @@ ss_m::begin_xct(
         sm_stats_info_t*             _stats, // allocated by caller
         timeout_in_ms timeout)
 {
-    SM_PROLOGUE_RC(ss_m::begin_xct, not_in_xct, read_only,  0);
     tid_t tid;
     W_DO(_begin_xct(_stats, tid, timeout));
     return RCOK;
@@ -711,7 +681,6 @@ ss_m::begin_xct(
 rc_t
 ss_m::begin_xct(timeout_in_ms timeout)
 {
-    SM_PROLOGUE_RC(ss_m::begin_xct, not_in_xct, read_only,  0);
     tid_t tid;
     W_DO(_begin_xct(0, tid, timeout));
     return RCOK;
@@ -723,7 +692,6 @@ ss_m::begin_xct(timeout_in_ms timeout)
 rc_t
 ss_m::begin_xct(tid_t& tid, timeout_in_ms timeout)
 {
-    SM_PROLOGUE_RC(ss_m::begin_xct, not_in_xct,  read_only, 0);
     W_DO(_begin_xct(0, tid, timeout));
     return RCOK;
 }
@@ -744,10 +712,8 @@ rc_t
 ss_m::commit_xct(sm_stats_info_t*& _stats, bool lazy,
                  lsn_t* plastlsn)
 {
-    SM_PROLOGUE_RC(ss_m::commit_xct, commitable_xct, read_write, 0);
 
     W_DO(_commit_xct(_stats, lazy, plastlsn));
-    prologue.no_longer_in_xct();
 
     return RCOK;
 }
@@ -776,11 +742,9 @@ ss_m::commit_xct_group(xct_t *list[], int listlen)
 rc_t
 ss_m::commit_xct(bool lazy, lsn_t* plastlsn)
 {
-    SM_PROLOGUE_RC(ss_m::commit_xct, commitable_xct, read_write, 0);
 
     sm_stats_info_t*             _stats=0;
     W_DO(_commit_xct(_stats,lazy,plastlsn));
-    prologue.no_longer_in_xct();
     /*
      * throw away the _stats, since user isn't harvesting...
      */
@@ -795,22 +759,17 @@ ss_m::commit_xct(bool lazy, lsn_t* plastlsn)
 rc_t
 ss_m::abort_xct(sm_stats_info_t*&             _stats)
 {
-    SM_PROLOGUE_RC(ss_m::abort_xct, abortable_xct, read_write, 0);
 
     // Temp removed for debugging purposes only
     // want to see what happens if the abort proceeds (scripts/alloc.10)
-    bool was_sys_xct = xct() && xct()->is_sys_xct();
+    // bool was_sys_xct = xct() && xct()->is_sys_xct();
     W_DO(_abort_xct(_stats));
-    if (!was_sys_xct) { // system transaction might be nested
-        prologue.no_longer_in_xct();
-    }
 
     return RCOK;
 }
 rc_t
 ss_m::abort_xct()
 {
-    SM_PROLOGUE_RC(ss_m::abort_xct, abortable_xct, read_write, 0);
     sm_stats_info_t*             _stats=0;
 
     W_DO(_abort_xct(_stats));
@@ -818,7 +777,6 @@ ss_m::abort_xct()
      * throw away _stats, since user is not harvesting them
      */
     delete _stats;
-    prologue.no_longer_in_xct();
 
     return RCOK;
 }
@@ -832,7 +790,6 @@ ss_m::save_work(sm_save_point_t& sp)
     // For now, consider this a read/write operation since you
     // wouldn't be doing this unless you intended to write and
     // possibly roll back.
-    SM_PROLOGUE_RC(ss_m::save_work, in_xct, read_write, 0);
     W_DO( _save_work(sp) );
     return RCOK;
 }
@@ -843,7 +800,6 @@ ss_m::save_work(sm_save_point_t& sp)
 rc_t
 ss_m::rollback_work(const sm_save_point_t& sp)
 {
-    SM_PROLOGUE_RC(ss_m::rollback_work, in_xct, read_write, 0);
     W_DO( _rollback_work(sp) );
     return RCOK;
 }
@@ -897,14 +853,12 @@ ss_m::xct_state_t ss_m::state_xct(const xct_t* x)
 rc_t
 ss_m::chain_xct( sm_stats_info_t*&  _stats, bool lazy)
 {
-    SM_PROLOGUE_RC(ss_m::chain_xct, commitable_xct, read_write, 0);
     W_DO( _chain_xct(_stats, lazy) );
     return RCOK;
 }
 rc_t
 ss_m::chain_xct(bool lazy)
 {
-    SM_PROLOGUE_RC(ss_m::chain_xct, commitable_xct, read_write, 0);
     sm_stats_info_t        *_stats = 0;
     W_DO( _chain_xct(_stats, lazy) );
     /*
@@ -933,10 +887,6 @@ ss_m::activate_archiver()
         logArchiver->activate(lsn_t::null, false);
     }
     return RCOK;
-}
-
-rc_t ss_m::force_volume() {
-    return bf->force_volume();
 }
 
 /*--------------------------------------------------------------*
@@ -971,22 +921,6 @@ ss_m::config_info(sm_config_info_t& info) {
 
     info.logging  = (ss_m::log != 0);
 
-    return RCOK;
-}
-
-/*--------------------------------------------------------------*
- *  ss_m::start_log_corruption()                        *
- *--------------------------------------------------------------*/
-rc_t
-ss_m::start_log_corruption()
-{
-    SM_PROLOGUE_RC(ss_m::start_log_corruption, in_xct, read_write, 0);
-    if(log) {
-        // flush current log buffer since all future logs will be
-        // corrupted.
-        errlog->clog << emerg_prio << "Starting Log Corruption" << flushl;
-        log->start_log_corruption();
-    }
     return RCOK;
 }
 
@@ -1083,46 +1017,6 @@ ss_m::dump_locks() {
 
 
 
-//#ifdef SLI_HOOKS
-/*--------------------------------------------------------------*
- *  Enable/Disable Shore-SM features                            *
- *--------------------------------------------------------------*/
-
-void ss_m::set_sli_enabled(bool /* enable */)
-{
-    fprintf(stdout, "SLI not supported\n");
-    //lm->set_sli_enabled(enable);
-    //TODO: SHORE-KITS-API
-    assert(0);
-}
-
-void ss_m::set_elr_enabled(bool /* enable */)
-{
-    fprintf(stdout, "ELR not supported\n");
-    //xct_t::set_elr_enabled(enable);
-    //TODO: SHORE-KITS-API
-    assert(0);
-}
-
-rc_t ss_m::set_log_features(char const* /* features */)
-{
-    fprintf(stdout, "Aether not integrated\n");
-    return (RCOK);
-    //return log->set_log_features(features);
-    //TODO: SHORE-KITS-API
-    assert(0);
-}
-
-char const* ss_m::get_log_features()
-{
-    fprintf(stdout, "Aether not integrated\n");
-    return ("NOT-IMPL");
-    //return log->get_log_features();
-    //TODO: SHORE-KITS-API
-    assert(0);
-}
-//#endif
-
 lil_global_table* ss_m::get_lil_global_table() {
     if (lm) {
         return lm->get_lil_global_table();
@@ -1137,34 +1031,6 @@ rc_t ss_m::lock(const lockid_t& n, const okvl_mode& m,
     W_DO( lm->lock(n.hash(), m, true, true, !check_only, NULL, timeout) );
     return RCOK;
 }
-
-
-/*--------------------------------------------------------------*
- *  ss_m::unlock()                                *
- *--------------------------------------------------------------*/
-/*rc_t
-ss_m::unlock(const lockid_t& n)
-{
-    SM_PROLOGUE_RC(ss_m::unlock, in_xct, read_only, 0);
-    W_DO( lm->unlock(n) );
-    return RCOK;
-}
-*/
-
-/*
-rc_t
-ss_m::query_lock(const lockid_t& n, lock_mode_t& m)
-{
-    SM_PROLOGUE_RC(ss_m::query_lock, in_xct, read_only, 0);
-    W_DO( lm->query(n, m, xct()->tid()) );
-
-    return RCOK;
-}
-*/
-
-/*****************************************************************
- * Internal/physical-ID version of all the storage operations
- *****************************************************************/
 
 /*--------------------------------------------------------------*
  *  ss_m::_begin_xct(sm_stats_info_t *_stats, timeout_in_ms timeout) *
@@ -1320,7 +1186,6 @@ ss_m::_commit_xct_group(xct_t *list[], int listlen)
          */
         me()->attach_xct(x);
         {
-        SM_PROLOGUE_RC(ss_m::mount_dev, commitable_xct, read_write, 0);
         W_DO( x->commit_as_group_member() );
         }
         w_assert1(me()->xct() == NULL);
@@ -1453,62 +1318,6 @@ ss_m::_rollback_work(const sm_save_point_t& sp)
     return RCOK;
 }
 
-/*--------------------------------------------------------------*
- *  ss_m::_get_du_statistics()        DU DF                    *
- *--------------------------------------------------------------*/
-rc_t
-ss_m::get_du_statistics(StoreID stpgid, sm_du_stats_t& du, bool audit)
-{
-    // TODO this should take S lock, not IS
-    PageID root_pid;
-    W_DO(open_store(stpgid, root_pid));
-
-    btree_stats_t btree_stats;
-    W_DO( bt->get_du_statistics(root_pid, btree_stats, audit));
-    if (audit) {
-        W_DO(btree_stats.audit());
-    }
-    du.btree.add(btree_stats);
-    du.btree_cnt++;
-    return RCOK;
-}
-
-
-/*--------------------------------------------------------------*
- *  ss_m::_get_du_statistics()  DU DF                           *
- *--------------------------------------------------------------*/
-rc_t
-ss_m::get_du_statistics(sm_du_stats_t& du, bool audit)
-{
-    sm_du_stats_t new_stats;
-
-    rc_t rc;
-    // get du stats on every store
-    for (StoreID s = 0; s < stnode_page::max; s++) {
-        DBG(<<" getting stats for store " << s);
-        rc = get_du_statistics(s, new_stats, audit);
-        if (rc.is_error()) {
-            if (rc.err_num() == eBADSTID) {
-                DBG(<<"skipping large object or missing store " << s );
-                continue;  // skip any stores that don't show
-                           // up in the directory index
-                           // in this case it this means stores for
-                           // large object pages
-            } else {
-                return rc;
-            }
-        }
-        DBG(<<"end for loop with s=" << s );
-    }
-
-    if (audit) {
-        W_DO(new_stats.audit());
-    }
-    du.add(new_stats);
-
-    return RCOK;
-}
-
 
 /*--------------------------------------------------------------*
  *  ss_m::gather_xct_stats()                            *
@@ -1520,12 +1329,6 @@ ss_m::get_du_statistics(sm_du_stats_t& du, bool audit)
 rc_t
 ss_m::gather_xct_stats(sm_stats_info_t& _stats, bool reset)
 {
-    // Use commitable_xct to ensure exactly 1 thread attached for
-    // clean collection of all stats,
-    // even those that read-only threads would increment.
-    //
-    SM_PROLOGUE_RC(ss_m::gather_xct_stats, commitable_xct, read_only, 0);
-
     w_assert3(xct() != 0);
     xct_t& x = *xct();
 

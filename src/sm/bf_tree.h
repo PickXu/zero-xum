@@ -10,11 +10,10 @@
 #include "tatas.h"
 #include "vol.h"
 #include "generic_page.h"
-#include "bf_idx.h"
 #include "bf_hashtable.h"
 #include "bf_tree_cb.h"
 #include <iosfwd>
-#include "page_cleaner_base.h"
+#include "page_cleaner.h"
 
 class sm_options;
 class lsn_t;
@@ -123,8 +122,17 @@ const uint16_t EVICT_MAX_ROUNDS = 20;
  * We cap the refcount to avoid contention on the cacheline of the frame's control
  * block (due to ping-pongs between sockets) when multiple sockets read-access the same frame.
  * The refcount max value should have enough granularity to separate cold from hot pages.
+ *
+ * CS TODO: but doesnt the latch itself already incur such cacheline bouncing?
+ * If so, then we could simply move the refcount inside latch_t (which must
+ * have the same size as a cacheline) and be done with it. No additional
+ * overhead on cache coherence other than the latching itself is expected. We
+ * could reuse the field _total_count in latch_t, or even split it into to
+ * 16-bit integers: one for shared and one for exclusive latches. This field is
+ * currently only used for tests, but it doesn't make sense to count CB
+ * references and latch acquisitions in separate variables.
  */
-const uint16_t BP_MAX_REFCOUNT = 16;
+const uint16_t BP_MAX_REFCOUNT = 1024;
 
 /**
  * Initial value of the per-frame refcount (reference counter).
@@ -178,6 +186,8 @@ public:
     /** destructs the buffer pool.  */
     ~bf_tree_m ();
 
+    void shutdown();
+
     /** returns the total number of blocks in this bufferpool. */
     inline bf_idx get_block_cnt() const {return _block_cnt;}
 
@@ -192,11 +202,6 @@ public:
      * this method should be used only when it has to be, such as before/after REDO recovery.
      */
     w_rc_t set_swizzling_enabled(bool enabled);
-
-    /** does additional initialization that might return error codes (thus can't be done in constructor). */
-    w_rc_t init (const sm_options& options);
-    /** does additional clean-up that might return error codes (thus can't be done in destructor). */
-    w_rc_t destroy ();
 
     /** returns the control block corresponding to the given memory frame index */
     bf_tree_cb_t& get_cb(bf_idx idx) const;
@@ -241,23 +246,6 @@ public:
     w_rc_t fix_nonroot (generic_page*& page, generic_page *parent, PageID shpid,
                           latch_mode_t mode, bool conditional, bool virgin_page,
                           lsn_t emlsn = lsn_t::null);
-
-    /**
-     * Fixes a non-root page in the bufferpool given a swizzled pointer that may be stale.
-     * Because of the possibility of staleness, the actual page fixed may be different
-     * from the page ID given.
-     *
-     * @param[out] page         the fixed page.
-     * @param[in]  shpid        ID of the page to fix
-     * @param[in]  mode         latch mode.  has to be Q, SH, or EX.
-     * @param[in]  conditional  whether the fix is conditional (returns immediately even if failed).
-     * @param[out] ticket       the resulting Q ticket if mode is LATCH_Q
-     *
-     * @pre shpid is a swizzled pointer
-     *
-     * To use this method, you need to include bf_tree_inline.h.
-     */
-    w_rc_t fix_unsafely_nonroot(generic_page*& page, PageID shpid, latch_mode_t mode, bool conditional, q_ticket_t& ticket);
 
     /**
      * Special function for the REDO phase in system Recovery process
@@ -322,10 +310,6 @@ public:
     void unfix(const generic_page* p);
 
     /**
-     * Mark the page as dirty.
-     */
-    void set_dirty(const generic_page* p);
-    /**
      * Returns if the page is already marked dirty.
      */
     bool is_dirty(const generic_page* p) const;
@@ -338,32 +322,16 @@ public:
     bf_idx lookup(PageID pid) const;
 
     /**
-     * Update the initial dirty lsn in the page if needed.
-     */
-    void update_initial_dirty_lsn(const generic_page* p,
-                                   const lsn_t new_lsn);
-
-    /**
-     * Set the _rec_lsn (the LSN which made the page dirty initially) in page cb
-     * if it is later than the new_lsn.
-     * This function is mainly used when a page format log record was generated
-     */
-    void set_initial_rec_lsn(PageID pid, const lsn_t new_lsn, const lsn_t current_lsn);
-
-    /**
      * Returns true if the page's _used flag is on
      */
     bool is_used (bf_idx idx) const;
 
-    /**
-     * Adds a write-order dependency such that one is always written out after another.
-     * @param[in] page the page to be written later. must be latched.
-     * @param[in] dependency the page to be written first. must be latched.
-     * @return whether the dependency is successfully registered. for a number of reasons,
-     * the dependency might be rejected. Thus, the caller must check the returned value
-     * and give up the logging optimization if rejected.
+    /*
+     * Sets the page_lsn field on the control block. Used by every update
+     * operation on a page, including redo.
      */
-    bool register_write_order_dependency(const generic_page* page, const generic_page* dependency);
+    void set_page_lsn(generic_page*, lsn_t);
+    lsn_t get_page_lsn(generic_page*);
 
     /**
      * Whenever the parent of a page is changed (adoption or de-adoption),
@@ -415,13 +383,6 @@ public:
       */
     PageID normalize_shpid(PageID shpid) const;
 
-    /** Immediately writes out all dirty pages in the given volume.*/
-    w_rc_t force_volume ();
-    /** Immediately writes out all dirty pages.*/
-    w_rc_t force_all ();
-    /** Wakes up all cleaner threads, starting them if not started yet. */
-    w_rc_t wakeup_cleaners ();
-
     /**
      * Dumps all contents of this bufferpool.
      * this method is solely for debugging. It's slow and unsafe.
@@ -447,19 +408,6 @@ public:
         int32_t idx = page - _buffer;
         return _is_valid_idx(idx);
     }
-
-    /**
-     * Get recovery lsn of "count" frames in the buffer pool starting at
-     *  index "start". The pids, rec_lsns and page_lsn are returned in "pid",
-     *  "rec_lsn" and "page_lsn" arrays, respectively. The values of "start" and "count"
-     *  are updated to reflect where the search ended and how many dirty
-     *  pages it found, respectively.
-     *  'master' and 'current_lsn' are used only for 'in_doubt' pages which are not loaded
-    */
-    void get_rec_lsn(bf_idx &start, uint32_t &count, PageID *pid, StoreID* store,
-                     lsn_t *rec_lsn, lsn_t *page_lsn, lsn_t &min_rec_lsn,
-                     const lsn_t master, const lsn_t current_lsn,
-                     lsn_t last_mount_lsn);
 
     /**
      * Returns true if the node has any swizzled pointers to its children.
@@ -498,6 +446,8 @@ public:
     w_rc_t load_for_redo(bf_idx idx, PageID shpid);
 
     size_t get_size() { return _block_cnt; }
+
+    page_cleaner_base* get_cleaner();
 
 private:
 
@@ -575,22 +525,11 @@ private:
     /**
      * Deletes the given block from this buffer pool. This method must be called when
      *  1. there is no concurrent accesses on the page (thus no latch)
-     *  2. the page's _used and _dirty are true
+     *  2. the page's _used is true
      *  3. the page's _pin_cnt is 0 (so, it must not be swizzled, nor being evicted)
      * Used from the dirty page cleaner to delete a page with "tobedeleted" flag.
      */
     void   _delete_block (bf_idx idx);
-
-    /**
-     * Returns if the dependency FROM cb is still active.
-     * If it turns out that the dependency is no longer active, it also clears _dependency_xxx to speed up future function call.
-     * cb must be pinned.
-     */
-    bool   _check_dependency_still_active (bf_tree_cb_t &cb);
-
-    bool   _check_dependency_cycle(bf_idx source, bf_idx start_idx);
-
-    bool   _compare_dependency_lsn(const bf_tree_cb_t& cb, const bf_tree_cb_t &dependency_cb) const;
 
     void   _swizzle_child_pointer(generic_page* parent, PageID* pointer_addr);
 
@@ -652,13 +591,6 @@ private:
 
     /** the dirty page cleaner. */
     page_cleaner_base*   _cleaner;
-
-    /**
-     * Unreliable count of dirty pages in this bufferpool.
-     * The value is incremented and decremented without atomic operations.
-     * So, this should be only used as statistics.
-     */
-    int32_t              _dirty_page_count_approximate;
     /**
      * Unreliable count of swizzled pages in this bufferpool.
      * The value is incremented and decremented without atomic operations.
@@ -668,6 +600,8 @@ private:
 
     /** whether to swizzle non-root pages. */
     bool                 _enable_swizzling;
+
+    bool _cleaner_decoupled;
 };
 
 /**

@@ -108,7 +108,7 @@ public:
      * CS TODO -- concurrency control?
      */
     bool finished()
-    { return metadataRestored && numRestoredPages == lastUsedPid; }
+    { return numRestoredPages == lastUsedPid; }
 
     size_t getSegmentSize() { return segmentSize; }
     PageID getFirstDataPid() { return firstDataPid; }
@@ -119,7 +119,7 @@ public:
 
     virtual void run();
 
-    void shutdown();
+    bool try_shutdown();
 
 protected:
     // Two bitmaps are required for asynchronous writing: one to tell which
@@ -171,10 +171,6 @@ protected:
      * per segment.
      */
     size_t segmentSize;
-
-    /** \brief Whether volume metadata is alread restored or not
-     */
-    bool metadataRestored;
 
     /** \brief Whether to copy restored pages into caller's buffers, avoiding
      * extra reads
@@ -235,20 +231,8 @@ protected:
     }
 
     void unpin() {
-        lintel::unsafe::atomic_fetch_sub(&pinCount, -1);
+        lintel::unsafe::atomic_fetch_sub(&pinCount, 1);
     }
-
-    /** \brief Restores metadata by replaying store operation log records
-     *
-     * This method is invoked before the restore loop starts (i.e., before any
-     * data page is restored). It replays all store operations -- which are
-     * logged on page id 0 -- in order to correctly restore volume metadata,
-     * i.e., stnode_cache_t. Allocation pages (i.e., alloc_cache_t) doesn't
-     * have to be restored explicitly, because pages are re-allocated when
-     * replaying their first log records (e.g., page_img_format, btree_split,
-     * etc.)
-     */
-    void restoreMetadata();
 
     /** \brief Method that executes the actual restore operations in a loop
      *
@@ -342,7 +326,7 @@ public:
     virtual ~RestoreScheduler();
 
     void enqueue(const PageID& pid);
-    PageID next(bool peek = false);
+    bool next(PageID& next, bool peek = false);
     void setSinglePass(bool singlePass = true);
     bool hasWaitingRequest();
 
@@ -388,12 +372,11 @@ inline bool RestoreMgr::isRestored(const PageID& pid)
         return false;
     }
 
-    if (pid < firstDataPid) {
-        // first pages are metadata
-        return metadataRestored;
+    unsigned seg = getSegmentForPid(pid);
+    if (seg >= bitmap->getSize()) {
+        return true;
     }
 
-    unsigned seg = getSegmentForPid(pid);
     return bitmap->get(seg);
 }
 

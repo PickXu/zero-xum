@@ -277,7 +277,7 @@ void Replica::setupOptions()
 	("archdir,a", po::value<string>(&archdir)->default_value("archive"),
 	    "Directory in which to store the log archive")
     ;
-    setupSMOptions();
+    setupSMOptions(options);
 }
 
 void Replica::mkdirs(string path)
@@ -374,14 +374,14 @@ void Replica::initPrimary()
 
 	ensureEmptyPath(p_logdir);
 	ensureParentPathExists(opt_dbfile);
-	p_shoreEnv->set_device(opt_dbfile);
+	//p_shoreEnv->set_device(opt_dbfile);
 
 	p_shoreEnv->start();
 
 	//flush dirty pages
 	ERROUT(<< "ShoreEnv Flushing Dirty Pages");
 
-        W_COERCE(smlevel_0::bf->force_volume());
+        //W_COERCE(smlevel_0::bf->force_volume());
         W_COERCE(smlevel_0::log->flush_all());
         me()->check_actual_pin_count(0);
 
@@ -410,7 +410,7 @@ void Replica::initSecondary()
     s_shoreEnv->init();
     s_shoreEnv->set_clobber(false);
     ensureParentPathExists(s_dbfile);
-    s_shoreEnv->set_device(s_dbfile);
+    //s_shoreEnv->set_device(s_dbfile);
 
     s_shoreEnv->start();
 }

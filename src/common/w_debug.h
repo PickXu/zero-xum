@@ -66,10 +66,6 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 
 #include <w_stream.h>
 
-#ifndef ERRLOG_H
-#include <errlog.h>
-#endif /* ERRLOG_H */
-
 /**\file w_debug.h
  *\ingroup MACROS
  *
@@ -84,44 +80,6 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 *  word "all", the message is printed.
 *
 *
-**** FUNC(fname)  dumps the function name.
-**** RETURN   prints that the function named by __func__ is returning
-*             This macro  MUST appear within braces if used after "if",
-*              "else", "while", etc.
-*
-**** DBG(arg) prints line & file and the message arg if __func__
-*              appears in the debug environment variable.
-*             The argument must be the innermost part of legit C++
-*             print statement, and it works ONLY in C++ sources.
-*
-*  Example :
-*
-* \code
-*    returntype
-*    proc(args)
-*    {
-*        FUNC(proc);
-*       ....body...
-*
-*       DBG(
-*          << "message" << value
-*          << "more message";
-*          if(test) {
-*             cerr << "xyz";
-*          }
-*          cerr
-*       )
-*
-*       ....more body...
-*       if(predicate) {
-*           RETURN value;
-*        }
-*    }
-*  \endcode
-*
- * FUNC, and RETURN macros' definitions depend on how
- * the storage manager is configured.
- * They don't do a lot unless configured with --enable-trace
 */
 #include <cassert>
 #include <pthread.h>
@@ -147,28 +105,6 @@ typedef    ios::fmtflags    w_dbg_fmtflags;
     (strrchr(f, '/') ? strrchr(f, '/') + 1 : f)
 
 
-#define FUNC(fn)\
-  do { \
-    if(_w_debug.flag_on(__func__,_strip_filename(__FILE__))) {              \
-        _w_debug.clog << __LINE__ << " "                   \
-        << _strip_filename(__FILE__) << ": " << __func__   \
-        << flushl;                                         \
-    }                                                      \
-  } while(0)
-
-#define RETURN \
-                do { \
-            if(_w_debug.flag_on(__func__,_strip_filename(__FILE__))) {\
-            w_dbg_fmtflags old = _w_debug.clog.setf(ios::dec, ios::basefield); \
-            _w_debug.clog  << __LINE__ << " " << _strip_filename(__FILE__) << ":" ; \
-            _w_debug.clog.setf(old, ios::basefield); \
-            _w_debug.clog << "return from " << __func__ << flushl; } } while(0); \
-            return
-
-#else /* -UW_TRACE */
-#    define FUNC(fn)
-#    undef RETURN
-#    define RETURN return
 #endif  /* W_TRACE*/
 
 /* ************************************************************************  */
@@ -189,7 +125,7 @@ typedef    ios::fmtflags    w_dbg_fmtflags;
  * should be sent. If DEBUG_FILE is not set, the output goes to
  * stderr.
  */
-class w_debug : public ErrLog {
+class w_debug {
     private:
         char *_flags;
         enum { _all = 0x1, _none = 0x2 };
@@ -221,8 +157,8 @@ extern w_debug _w_debug;
 
 // I wanted to use google-logging (glog), but changing all of the existing code
 // takes time. So, currently it's just std::cout.
-#define ERROUT(a) std::cerr << "[" << hex << pthread_self() << dec << "] " << __FILE__ << " (" << __LINE__ << ") " a << flushl;
-//#define DBGOUT(a) std::cout << "[" << pthread_self() << "] " << __FILE__ << " (" << __LINE__ << ") " a << flushl;
+#define ERROUT(a) std::cerr << "[" << hex << pthread_self() << dec << "] " << __FILE__ << " (" << __LINE__ << ") " a << endl;
+//#define DBGOUT(a) std::cout << "[" << pthread_self() << "] " << __FILE__ << " (" << __LINE__ << ") " a << endl;
 
 // CS: reverted back to shore's old debug mechanism, which allows us
 // to select only output from certain source files. The current mechanism
@@ -232,7 +168,7 @@ extern w_debug _w_debug;
        std::stringstream ss; \
        ss << "[" << hex << pthread_self() << dec << "] " \
             << _strip_filename(file) << " (" << line << ") " a; \
-       std::cerr << ss.str() << flushl;
+       std::cerr << ss.str() << endl;
 
 #define DBGOUT(a) do { \
     if(_w_debug.flag_on(__func__,_strip_filename(__FILE__))) { \
@@ -305,6 +241,7 @@ extern w_debug _w_debug;
 #endif
 
 #define DBG1(a) DBGOUT1(a)
+#define DBG2(a) DBGOUT2(a)
 #define DBG3(a) DBGOUT3(a)
 #define DBG5(a) DBGOUT5(a)
 
@@ -331,7 +268,7 @@ extern w_debug _w_debug;
         w_dbg_fmtflags old = _w_debug.clog.setf(ios::dec, ios::basefield); \
         _w_debug.clog  << _strip_filename(file) << ":" << line << ":" ; \
         _w_debug.clog.setf(old, ios::basefield); \
-        _w_debug.clog  a    << flushl;
+        _w_debug.clog  a    << endl;
 
 #    define DBG1(a) do {\
     if(_w_debug.flag_on(__func__,__FILE__)) {                \
@@ -345,7 +282,7 @@ extern w_debug _w_debug;
 #endif *//* defined(W_TRACE) */
 /* ************************************************************************  */
 
-#define DBG2(a,f,l) DBGPRINT(a,f,l) // used by smthread.h
+// #define DBG2(a,f,l) DBGPRINT(a,f,l) // used by smthread.h
 
 #define DBGTHRD(arg) DBG(<<" th."<<sthread_t::me()->id << " " arg)
 

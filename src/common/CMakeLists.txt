@@ -1,7 +1,6 @@
 INCLUDE_DIRECTORIES(${CMAKE_CURRENT_BINARY_DIR})
 
 set(common_SRCS
-  ${CMAKE_CURRENT_SOURCE_DIR}/errlog.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/sthread.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/sthread_core_pthread.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/sthread_stats.cpp
@@ -9,7 +8,6 @@ set(common_SRCS
   ${CMAKE_CURRENT_SOURCE_DIR}/io.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/sdisk_unix.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/sdisk.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/vtable_sthread.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/w_debug.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/rand48.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/block_alloc.cpp
@@ -18,7 +16,6 @@ set(common_SRCS
   ${CMAKE_CURRENT_SOURCE_DIR}/gethrtime.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/w_compat_strstream.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/stime.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/vtable.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/w_base.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/w_listm.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/tls.cpp
@@ -31,7 +28,8 @@ set(common_SRCS
   ${CMAKE_CURRENT_SOURCE_DIR}/tid_t.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/vec_mkchunk.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/vec_t.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/protobuf/log_replication.pb.cc)
+  ${CMAKE_CURRENT_SOURCE_DIR}/protobuf/log_replication.pb.cc
+  )
 
 add_library(common STATIC ${common_SRCS})
 target_link_libraries (common pthread rt protobuf)

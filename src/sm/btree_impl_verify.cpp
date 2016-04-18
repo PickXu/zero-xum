@@ -17,7 +17,6 @@
 
 // these are for volume-wide verifications
 #include "sm.h"
-#include "pmap.h"
 #include "vol.h"
 #include "xct.h"
 #include "sm_base.h"
@@ -360,12 +359,13 @@ bool verification_context::is_bitmap_clean () const
 rc_t btree_impl::_ux_verify_volume(
     int hash_bits, verify_volume_result &result)
 {
-    W_DO(ss_m::force_volume()); // this might block if there is a concurrent transaction
+    smlevel_0::bf->get_cleaner()->wakeup(true);
     vol_t *vol = ss_m::vol;
     w_assert1(vol);
     generic_page buf;
     PageID endpid = (PageID) (vol->num_used_pages());
-    for (PageID pid = vol->first_data_pageid(); pid < endpid; ++pid) {
+    // CS TODO should skip non-btree PIDs
+    for (PageID pid = 0; pid < endpid; ++pid) {
         // TODO we should skip large chunks of unused areas to speedup.
         // TODO we should scan more than one page at a time to speedup.
         if (!vol->is_allocated_page(pid)) {

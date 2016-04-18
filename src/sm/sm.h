@@ -71,7 +71,6 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 #include <sm_base.h>
 #endif
 
-#include <sm_du_stats.h> // declares sm_du_stats_t
 #include <smstats.h> // declares sm_stats_info_t and sm_config_info_t
 #include <lsn.h>
 #include <string>
@@ -599,7 +598,7 @@ public:
      */
     static rc_t         log_file_was_archived(const char * logfile);
 
-    rc_t                _truncate_log(bool ignore_chkpt = false);
+    rc_t                _truncate_log();
 
 private:
 //    void                _construct_once(LOG_WARN_CALLBACK_FUNC x=NULL,
@@ -1067,17 +1066,6 @@ public:
     */
     static rc_t            set_disk_delay(u_int milli_sec);
 
-    /**\cond skip */
-    // TODO : document crash testing facilities
-    /**\brief Simulate a crash
-     * \details
-     * This method tells the log manager to start generating corrupted
-     * log records.  This will make it appear that a crash occurred
-     * at that point in the log.  A call to this method should be
-     * followed immediately by a dirty shutdown of the ssm.
-     */
-    static rc_t            start_log_corruption();
-
     /**
      * \brief Forces a log flush
      * \ingroup SSMLOG
@@ -1353,17 +1341,6 @@ public:
      *
      *****************************************************************/
 
-//#ifdef SLI_HOOKS
-    /* enable/disable SLI globally for all threads created after this
-       point. Does *NOT* disable SLI for existing threads.
-     */
-    static void            set_sli_enabled(bool enabled);
-    static void            set_elr_enabled(bool enabled);
-
-    static rc_t            set_log_features(char const* features);
-    static char const*         get_log_features();
-//#endif
-
     /** Returns the global lock table object for light-weight intent locks. */
     static lil_global_table*  get_lil_global_table();
 
@@ -1386,21 +1363,15 @@ public:
 
     static rc_t            activate_archiver();
 
+    /** Start-up parameters for the storage engine. */
+    static sm_options _options;
+
     static const sm_options& get_options() { return _options; }
 
-    static rc_t get_du_statistics(StoreID stpgid, sm_du_stats_t& du, bool audit);
-
-    // this is for df statistics  DU DF
-    static rc_t            get_du_statistics(
-        sm_du_stats_t&         du,
-        bool                   audit);
 
 private:
 
     static int _instance_cnt;
-
-    /** Start-up parameters for the storage engine. */
-    static sm_options _options;
 
     void _set_option_logsize();
 

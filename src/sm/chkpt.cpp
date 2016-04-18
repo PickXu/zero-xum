@@ -63,7 +63,6 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 #define CHKPT_C
 
 #include "sm_base.h"
-#include "chkpt_serial.h"
 #include "chkpt.h"
 #include "btree_logrec.h"       // Lock re-acquisition
 #include "bf_tree.h"
@@ -96,7 +95,7 @@ struct RawLock;            // Lock information gathering
 class chkpt_thread_t : public smthread_t
 {
 public:
-    NORET                chkpt_thread_t(unsigned interval);
+    NORET                chkpt_thread_t(int interval);
     NORET                ~chkpt_thread_t();
 
     virtual void        run();
@@ -105,8 +104,9 @@ public:
     bool                is_retired() {return _retire;}
 
 private:
+    bool                _wakeup;
     bool                _retire;
-    unsigned            _interval;
+    int                 _interval;
     pthread_mutex_t     _awaken_lock;
     pthread_cond_t      _awaken_cond;
 
@@ -116,13 +116,9 @@ private:
 };
 
 chkpt_m::chkpt_m(const sm_options& options)
-    : _chkpt_thread(NULL), _chkpt_count(0)
+    : _chkpt_thread(NULL), _chkpt_count(0), _min_rec_lsn(0), _min_xct_lsn(0),
+    _last_end_lsn(0)
 {
-    _chkpt_last = ss_m::log->master_lsn();
-    if(_chkpt_last == lsn_t::null) {
-        _chkpt_last = lsn_t(1,0);
-    }
-
     int interval = options.get_int_option("sm_chkpt_interval", -1);
     if (interval >= 0) {
         _chkpt_thread = new chkpt_thread_t(interval);
@@ -132,10 +128,8 @@ chkpt_m::chkpt_m(const sm_options& options)
 
 chkpt_m::~chkpt_m()
 {
-    if (_chkpt_thread)
-    {
+    if (_chkpt_thread) {
         _chkpt_thread->retire();
-        _chkpt_thread->awaken();
         W_COERCE(_chkpt_thread->join());
         delete _chkpt_thread;
     }
@@ -143,9 +137,11 @@ chkpt_m::~chkpt_m()
 
 void chkpt_m::wakeup_thread()
 {
-    if (_chkpt_thread) {
-        _chkpt_thread->awaken();
+    if (!_chkpt_thread) {
+        _chkpt_thread = new chkpt_thread_t(-1);
+        W_COERCE(_chkpt_thread->fork());
     }
+    _chkpt_thread->awaken();
 }
 
 /*********************************************************************
@@ -165,12 +161,13 @@ void chkpt_t::scan_log()
 
     log_i scan(*smlevel_0::log, scan_start, false); // false == backward scan
     logrec_t r;
-    lsn_t lsn;   // LSN of the retrieved log record
+    lsn_t lsn = lsn_t::max;   // LSN of the retrieved log record
+
+    // Set when scan finds begin of previous checkpoint
+    lsn_t scan_stop = lsn_t(1,0);
 
     bool insideChkpt = false;
-    bool scan_done = false;
-
-    while (scan.xct_next(lsn, r) && !scan_done)
+    while (lsn > scan_stop && scan.xct_next(lsn, r))
     {
         if (r.is_skip() || r.type() == logrec_t::t_comment) {
             continue;
@@ -196,11 +193,11 @@ void chkpt_t::scan_log()
 
         if (r.is_page_update()) {
             w_assert0(r.is_redo());
-            mark_page_dirty(r.pid(), lsn, lsn, r.stid());
+            mark_page_dirty(r.pid(), lsn, lsn);
 
             if (r.is_multi_page()) {
                 w_assert0(r.pid2() != 0);
-                mark_page_dirty(r.pid2(), lsn, lsn, r.stid());
+                mark_page_dirty(r.pid2(), lsn, lsn);
             }
         }
 
@@ -209,8 +206,7 @@ void chkpt_t::scan_log()
             case logrec_t::t_chkpt_begin:
                 if (insideChkpt) {
                     // Signal to stop backward log scan loop now
-                    begin_lsn = lsn;
-                    scan_done = true;
+                    scan_stop = lsn;
                 }
                 break;
 
@@ -219,7 +215,7 @@ void chkpt_t::scan_log()
                     const chkpt_bf_tab_t* dp = (chkpt_bf_tab_t*) r.data();
                     for (uint i = 0; i < dp->count; i++) {
                         mark_page_dirty(dp->brec[i].pid, dp->brec[i].page_lsn,
-                                dp->brec[i].rec_lsn, dp->brec[i].store);
+                                dp->brec[i].rec_lsn);
                     }
                 }
                 break;
@@ -276,14 +272,22 @@ void chkpt_t::scan_log()
                 }
                 break;
 
+
             case logrec_t::t_page_write:
                 {
-                    PageID pid = *((PageID*) r.data());
-                    uint32_t count = *((uint32_t*) (r.data() + sizeof(PageID)));
+                    char* pos = r.data();
+
+                    PageID pid = *((PageID*) pos);
+                    pos += sizeof(PageID);
+
+                    lsn_t clean_lsn = *((lsn_t*) pos);
+                    pos += sizeof(lsn_t);
+
+                    uint32_t count = *((uint32_t*) pos);
                     PageID end = pid + count;
 
                     while (pid < end) {
-                        mark_page_clean(pid, lsn);
+                        mark_page_clean(pid, clean_lsn);
                         pid++;
                     }
                 }
@@ -315,47 +319,31 @@ void chkpt_t::scan_log()
         } //switch
     } //while
 
-    w_assert0(lsn == lsn_t(1,0) || scan_done);
-    w_assert0(lsn == lsn_t(1,0) || !begin_lsn.is_null());
+    w_assert0(lsn == scan_stop);
 
     cleanup();
 }
 
 void chkpt_t::init()
 {
-    begin_lsn = lsn_t::null;
     highest_tid = tid_t::null;
     buf_tab.clear();
     xct_tab.clear();
     bkp_path.clear();
 }
 
-void chkpt_t::mark_page_dirty(PageID pid, lsn_t page_lsn, lsn_t rec_lsn,
-        StoreID store)
+void chkpt_t::mark_page_dirty(PageID pid, lsn_t page_lsn, lsn_t rec_lsn)
 {
-    // operator[] adds an empty dirty entry if key is not found
     buf_tab_entry_t& e = buf_tab[pid];
-    if (e.resolved) { return; }
     if (page_lsn > e.page_lsn) { e.page_lsn = page_lsn; }
-    if (rec_lsn < e.rec_lsn) { e.rec_lsn = rec_lsn; }
-    // CS TODO: why do we need the store?
-    e.store = store;
+    if (rec_lsn >= e.clean_lsn && rec_lsn < e.rec_lsn) { e.rec_lsn = rec_lsn; }
 }
 
 void chkpt_t::mark_page_clean(PageID pid, lsn_t lsn)
 {
-    // If pid is already on table, it must remain as dirty.
-    // But resolved is set anyway, to stop rec and page lsn from being updated
-    // further in mark_page_dirty
-    buf_tab_t::iterator it = buf_tab.find(pid);
-    if (it != buf_tab.end()) {
-        it->second.resolved = true;
-    }
-    else {
-        buf_tab_entry_t e;
-        e.dirty = false;
-        e.resolved = true;
-        buf_tab[pid] = e;
+    buf_tab_entry_t& e = buf_tab[pid];
+    if (lsn > e.clean_lsn) {
+        e.clean_lsn = lsn;
     }
 }
 
@@ -405,7 +393,7 @@ void chkpt_t::cleanup()
     // Remove non-dirty pages
     for(buf_tab_t::iterator it  = buf_tab.begin();
                             it != buf_tab.end(); ) {
-        if(it->second.dirty == false) {
+        if(!it->second.is_dirty()) {
             it = buf_tab.erase(it);
         }
         else {
@@ -447,7 +435,7 @@ lsn_t chkpt_t::get_min_rec_lsn() const
     for(buf_tab_t::const_iterator it = buf_tab.begin();
             it != buf_tab.end(); ++it)
     {
-        if(it->second.dirty && min_rec_lsn > it->second.rec_lsn) {
+        if(it->second.is_dirty() && min_rec_lsn > it->second.rec_lsn) {
             min_rec_lsn = it->second.rec_lsn;
         }
     }
@@ -458,7 +446,7 @@ lsn_t chkpt_t::get_min_rec_lsn() const
 void chkpt_t::serialize()
 {
     // Allocate a buffer for storing log records
-    w_auto_delete_t<logrec_t> logrec(new logrec_t);
+    logrec_t* logrec = new logrec_t;
 
     size_t chunk;
 
@@ -475,27 +463,22 @@ void chkpt_t::serialize()
     // Serialize buf_tab
     chunk = chkpt_bf_tab_t::max;
     vector<PageID> pid;
-    vector<StoreID> store;
     vector<lsn_t> rec_lsn;
     vector<lsn_t> page_lsn;
     for(buf_tab_t::const_iterator it = buf_tab.begin();
             it != buf_tab.end(); ++it)
     {
         DBGOUT1(<<"pid[]="<<it->first<< " , " <<
-                  "store[]="<<it->second.store<< " , " <<
                   "rec_lsn[]="<<it->second.rec_lsn<< " , " <<
                   "page_lsn[]="<<it->second.page_lsn);
         pid.push_back(it->first);
-        store.push_back(it->second.store);
         rec_lsn.push_back(it->second.rec_lsn);
         page_lsn.push_back(it->second.page_lsn);
          if(pid.size()==chunk || &*it==&*buf_tab.rbegin()) {
             LOG_INSERT(chkpt_bf_tab_log(pid.size(), (const PageID*)(&pid[0]),
-                                                    (const StoreID*)(&store[0]),
                                                     (const lsn_t*)(&rec_lsn[0]),
                                                     (const lsn_t*)(&page_lsn[0])), 0);
             pid.clear();
-            store.clear();
             rec_lsn.clear();
             page_lsn.clear();
          }
@@ -566,7 +549,8 @@ void chkpt_t::serialize()
                                         (const lsn_t*)(&last_lsn[0]),
                                         (const lsn_t*)(&first_lsn[0])), 0);
     }
-    //==========================================================================
+
+    delete logrec;
 }
 
 void chkpt_t::acquire_lock(logrec_t& r)
@@ -681,41 +665,41 @@ void chkpt_t::dump(ostream& os)
     // os << endl;
 }
 
+
 void chkpt_m::take()
 {
-    chkpt_serial_m::write_acquire();
+    chkpt_mutex.acquire_write();
     DBGOUT1(<<"BEGIN chkpt_m::take");
 
     INC_TSTAT(log_chkpt_cnt);
 
     // Insert chkpt_begin log record.
-    w_auto_delete_t<logrec_t> logrec(new logrec_t);
-    lsn_t begin_lsn = lsn_t::null;
-    LOG_INSERT(chkpt_begin_log(lsn_t::null), &begin_lsn);
+    logrec_t* logrec = new logrec_t;
+    LOG_INSERT(chkpt_begin_log(lsn_t::null), NULL);
     W_COERCE(ss_m::log->flush_all());
 
     curr_chkpt.scan_log();
     curr_chkpt.serialize();
 
+    _min_rec_lsn = curr_chkpt.get_min_rec_lsn();
+    _min_xct_lsn = curr_chkpt.get_min_xct_lsn();
+
     // Insert chkpt_end log record
-    LOG_INSERT(chkpt_end_log (curr_chkpt.get_begin_lsn(),
-                curr_chkpt.get_min_rec_lsn(),
-                curr_chkpt.get_min_xct_lsn()), 0);
+    // CS TODO -- are the "min" LSNs still required in the logrec?
+    LOG_INSERT(chkpt_end_log (_last_end_lsn, _min_rec_lsn, _min_xct_lsn),
+            &_last_end_lsn);
 
     // Release the 'write' mutex so the next checkpoint request can come in
-    chkpt_serial_m::write_release();
+    chkpt_mutex.release_write();
 
     W_COERCE(ss_m::log->flush_all());
-    DBGOUT1(<<"Setting master_lsn to " << curr_chkpt.get_begin_lsn());
-    // CS TODO: get rid of master lsn
-    ss_m::log->set_master(curr_chkpt.get_begin_lsn(),
-            curr_chkpt.get_min_rec_lsn(),
-            curr_chkpt.get_min_xct_lsn());
+
+    delete logrec;
 }
 
-chkpt_thread_t::chkpt_thread_t(unsigned interval)
+chkpt_thread_t::chkpt_thread_t(int interval)
     : smthread_t(t_time_critical, "chkpt", WAIT_NOT_USED),
-    _retire(false), _interval(interval)
+    _wakeup(false), _retire(false), _interval(interval)
 {
     DO_PTHREAD(pthread_mutex_init(&_awaken_lock, NULL));
     DO_PTHREAD(pthread_cond_init(&_awaken_cond, NULL));
@@ -728,47 +712,47 @@ chkpt_thread_t::~chkpt_thread_t()
 void
 chkpt_thread_t::run()
 {
-    // Thread waits for an awake signal or for the interval timeout;
-    // whichever comes first
-    while(! _retire)
+    while(!_retire)
     {
         w_assert1(ss_m::chkpt);
         DO_PTHREAD(pthread_mutex_lock(&_awaken_lock));
 
-        struct timespec timeout;
-        sthread_t::timeout_to_timespec(_interval * 1000, timeout); // in ms
-        int code = pthread_cond_timedwait(&_awaken_cond, &_awaken_lock, &timeout);
-        DO_PTHREAD_TIMED(code);
+        if (_interval >= 0) {
+            struct timespec timeout;
+            sthread_t::timeout_to_timespec(_interval * 1000, timeout); // in ms
+            int code = pthread_cond_timedwait(&_awaken_cond, &_awaken_lock, &timeout);
+            if (code == ETIMEDOUT) {
+                _wakeup = true;
+            }
+            DO_PTHREAD_TIMED(code);
+        }
+        else {
+            DO_PTHREAD(pthread_cond_wait(&_awaken_cond, &_awaken_lock));
+        }
 
-        lintel::atomic_thread_fence(lintel::memory_order_acquire);
-        if(_retire) break;
+        DO_PTHREAD(pthread_mutex_unlock(&_awaken_lock));
+
+        if (_retire) { break; }
+        if (!_wakeup) { continue; }
 
         ss_m::chkpt->take();
-
-        // CS: see comment on awaken()
-        DO_PTHREAD(pthread_mutex_unlock(&_awaken_lock));
     }
 }
 
 void
 chkpt_thread_t::retire()
 {
+    DO_PTHREAD(pthread_mutex_lock(&_awaken_lock));
     _retire = true;
-    lintel::atomic_thread_fence(lintel::memory_order_release);
+    DO_PTHREAD(pthread_cond_signal(&_awaken_cond));
+    DO_PTHREAD(pthread_mutex_unlock(&_awaken_lock));
 }
 
 void
 chkpt_thread_t::awaken()
 {
-    // Signal may well be lost, which means checkpoint is already running.
-    // If an unlucky sequence of events causes the signal to be missed while
-    // the checkpoint thread is not running, it should not be a problem since
-    // the caller who is waiting on a checkpoint (e.g.,
-    // log_storage::get_partition_for_flush) should keep retrying in a loop.
-    // Therefore, there's no need for acquiring the mutex here.
-    // Since the chkpt thread runs in an interval, there's also no need to
-    // use some kind of condition variable like _wakeup_received. We might want
-    // to revisit this later and support a chkpt thread that only runs when
-    // recieving a signal (e.g., if _interval < 0).
+    DO_PTHREAD(pthread_mutex_lock(&_awaken_lock));
+    _wakeup = true;
     DO_PTHREAD(pthread_cond_signal(&_awaken_cond));
+    DO_PTHREAD(pthread_mutex_unlock(&_awaken_lock));
 }

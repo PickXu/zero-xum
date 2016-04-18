@@ -39,7 +39,6 @@ void basethread_t::start_base()
 {
     sthread_t::initialize_sthreads_package();
     smthread_t::init_fingerprint_map();
-    smlevel_0::errlog = new ErrLog("loginspect", log_to_stderr, "-");
 }
 
 void basethread_t::start_buffer()
@@ -56,7 +55,7 @@ void basethread_t::start_log(string logdir)
 {
     if (!smlevel_0::log) {
         // instantiate log manager
-        log_m* log;
+        log_core* log;
         cerr << "Initializing log manager ... " << flush;
         _options.set_string_option("sm_logdir", logdir);
         _options.set_int_option("sm_logsize", 10000 * 1024);
@@ -121,7 +120,7 @@ void basethread_t::print_stats()
 {
     sm_stats_info_t stats;
     ss_m::gather_stats(stats);
-    cout << stats << flushl;
+    cout << stats << endl;
 }
 
 /*

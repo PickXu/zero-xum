@@ -183,15 +183,7 @@ logrec_t::fill_xct_attr(const tid_t& tid, const lsn_t& last)
 bool
 logrec_t::valid_header(const lsn_t & lsn) const
 {
-    if (header._len < sizeof(baseLogHeader)
-        || header._type >= logrec_t::t_max_logrec
-        || cat() == t_bad_cat
-        || header._len > sizeof(logrec_t)
-        || (lsn != lsn_t::null && lsn != *_lsn_ck()))
-    {
-        return false;
-    }
-    return true;
+    return header.is_valid() && (lsn == lsn_t::null || lsn == *_lsn_ck());
 }
 
 
@@ -204,7 +196,6 @@ logrec_t::valid_header(const lsn_t & lsn) const
  *********************************************************************/
 void logrec_t::redo(fixable_page_h* page)
 {
-    FUNC(logrec_t::redo);
     DBG( << "Redo  log rec: " << *this
         << " size: " << header._len << " xid_prevlsn: " << (is_single_sys_xct() ? lsn_t::null : xid_prev()) );
 
@@ -224,16 +215,8 @@ void logrec_t::redo(fixable_page_h* page)
 #include "redo_gen.cpp"
     }
 
-    /*
-     *  Page is dirty after redo.
-     *  (not all redone log records have a page)
-     *  NB: the page lsn in set by the caller (in restart.cpp)
-     *  This is ok in recovery because in this phase, there
-     *  is not a bf_cleaner thread running. (that thread asserts
-     *  that if the page is dirty, its lsn is non-null, and we
-     *  have a short-lived violation of that right here).
-     */
-    if(page) page->set_dirty();
+    page->update_page_lsn(lsn());
+    page->set_img_page_lsn(lsn());
 }
 
 static __thread logrec_t::kind_t undoing_context = logrec_t::t_max_logrec; // for accounting TODO REMOVE
@@ -253,7 +236,6 @@ logrec_t::undo(fixable_page_h* page)
 {
     w_assert0(!is_single_sys_xct()); // UNDO shouldn't be called for single-log sys xct
     undoing_context = logrec_t::kind_t(header._type);
-    FUNC(logrec_t::undo);
     DBG( << "Undo  log rec: " << *this
         << " size: " << header._len  << " xid_prevlsn: " << xid_prev());
 
@@ -464,7 +446,6 @@ chkpt_end_log::chkpt_end_log(const lsn_t& lsn, const lsn_t& min_rec_lsn,
 chkpt_bf_tab_t::chkpt_bf_tab_t(
     int                 cnt,        // I-  # elements in pids[] and rlsns[]
     const PageID*         pids,        // I-  id of of dirty pages
-    const StoreID*        stores,       // I-  store number of dirty pages
     const lsn_t*         rlsns,        // I-  rlsns[i] is recovery lsn of pids[i], the oldest
     const lsn_t*         plsns)        // I-  plsns[i] is page lsn lsn of pids[i], the latest
     : count(cnt)
@@ -473,7 +454,6 @@ chkpt_bf_tab_t::chkpt_bf_tab_t(
     w_assert1(count <= max);
     for (uint i = 0; i < count; i++) {
         brec[i].pid = pids[i];
-        brec[i].store = stores[i];
         brec[i].rec_lsn = rlsns[i];
         brec[i].page_lsn = plsns[i];
     }
@@ -483,11 +463,10 @@ chkpt_bf_tab_t::chkpt_bf_tab_t(
 chkpt_bf_tab_log::chkpt_bf_tab_log(
     int                 cnt,        // I-  # elements in pids[] and rlsns[]
     const PageID*         pid,        // I-  id of of dirty pages
-    const StoreID*        store,   // I- store number of dirty pages
     const lsn_t*         rec_lsn,// I-  rec_lsn[i] is recovery lsn (oldest) of pids[i]
     const lsn_t*         page_lsn)// I-  page_lsn[i] is page lsn (latest) of pids[i]
 {
-    fill((PageID) 0, (new (_data) chkpt_bf_tab_t(cnt, pid, store, rec_lsn, page_lsn))->size());
+    fill((PageID) 0, (new (_data) chkpt_bf_tab_t(cnt, pid, rec_lsn, page_lsn))->size());
 }
 
 
@@ -620,6 +599,9 @@ chkpt_restore_tab_log::chkpt_restore_tab_log()
 
 void chkpt_restore_tab_log::redo(fixable_page_h*)
 {
+    // CS TODO: disabled for now
+    return;
+
     chkpt_restore_tab_t* tab = (chkpt_restore_tab_t*) _data;
 
     vol_t* vol = smlevel_0::vol;
@@ -694,6 +676,8 @@ restore_begin_log::restore_begin_log()
 
 void restore_begin_log::redo(fixable_page_h*)
 {
+    return; // CS TODO: disabled for now
+
     vol_t* volume = smlevel_0::vol;
     // volume must be mounted
     w_assert0(volume);
@@ -716,6 +700,8 @@ restore_end_log::restore_end_log()
 
 void restore_end_log::redo(fixable_page_h*)
 {
+    return; // CS TODO: disabled for now
+
     vol_t* volume = smlevel_0::vol;
     // volume must be mounted and failed
     w_assert0(volume && volume->is_failed());
@@ -743,6 +729,8 @@ restore_segment_log::restore_segment_log(uint32_t segment)
 
 void restore_segment_log::redo(fixable_page_h*)
 {
+    return; // CS TODO: disabled for now
+
     vol_t* volume = smlevel_0::vol;
     // volume must be mounted and failed
     w_assert0(volume && volume->is_failed());
@@ -822,7 +810,6 @@ void page_img_format_log::redo(fixable_page_h* page) {
     // REDO is simply applying the image
     page_img_format_t* dp = (page_img_format_t*) _data;
     dp->apply(page);
-    page->set_dirty();
 }
 
 
@@ -893,6 +880,12 @@ operator<<(ostream& o, const logrec_t& l)
                 o << " stid: " <<  *((StoreID*) l.data_ssx());
                 o << " root_pid: " << *((PageID*) (l.data_ssx() + sizeof(StoreID)));
                 break;
+            }
+        case t_page_write:
+            {
+                PageID first = *((PageID*) (l.data()));
+                PageID last = first + *((uint32_t*) (l.data() + sizeof(PageID) + sizeof(lsn_t))) - 1;
+                o << " pids: " << first << "-" << last;
             }
 
 

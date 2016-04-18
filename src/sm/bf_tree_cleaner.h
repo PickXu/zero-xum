@@ -5,27 +5,49 @@
 #ifndef BF_TREE_CLEANER_H
 #define BF_TREE_CLEANER_H
 
-#include "w_defines.h"
-#include "sm_base.h"
-#include "smthread.h"
-#include "bf_idx.h"
-#include "lsn.h"
-#include "vol.h"
-#include <AtomicCounter.hpp>
-#include <vector>
-#include "page_cleaner_base.h"
+#include "page_cleaner.h"
+#include "bf_tree_cb.h"
+#include <functional>
 
 class bf_tree_m;
-class generic_page;
 
 /**
- * \brief The diry page cleaner for the new bufferpool manager.
- * \ingroup SSMBUFPOOL
- * \details
- * This class manages all worker threads which do the
- * actual page cleaning.
+ * These classes encapsulate a single comparator function to be used
+ * as a cleaner policy.
  */
+enum class cleaner_policy {
+    highest_refcount,
+    lowest_refcount,
+    oldest_lsn,
+    mixed
+};
+
+/**
+ * Information about each candidate control block considered by whatever
+ * cleaner policy is currently active
+ */
+struct cleaner_cb_info {
+    lsn_t clean_lsn;
+    lsn_t page_lsn;
+    bf_idx idx;
+    PageID pid;
+    uint16_t ref_count;
+
+    cleaner_cb_info(bf_idx idx, const bf_tree_cb_t& cb) :
+        clean_lsn(cb.get_clean_lsn()),
+        page_lsn(cb.get_page_lsn()),
+        idx(idx),
+        pid(cb._pid),
+        ref_count(cb._ref_count_ex)
+    {}
+};
+
+/** Type of predicate functions used by cleaner policies */
+using policy_predicate_t =
+    std::function<bool(const cleaner_cb_info&, const cleaner_cb_info&)>;
+
 class bf_tree_cleaner : public page_cleaner_base {
+    friend class candidate_collector_thread;
 public:
     /**
      * Constructs this object. This merely allocates arrays and objects.
@@ -43,67 +65,54 @@ public:
      */
     ~bf_tree_cleaner();
 
-    void run();
+protected:
+    virtual void do_work ();
 
-    /**
-     * Wakes up the cleaner thread assigned to the given volume.
-     */
-    w_rc_t wakeup_cleaner();
+    /** Return predicate function object that implements given policy */
+    policy_predicate_t get_policy_predicate();
 
-    /**
-     * Gracefully request all cleaners to stop.
-     */
-    w_rc_t shutdown ();
-
-    /** Immediately writes out all dirty pages in the given volume.*/
-    w_rc_t force_volume();
+    bool ignore_min_write_now() const
+    {
+        if (min_write_size <= 1) { return true; }
+        return min_write_ignore_freq > 0 &&
+            (get_rounds_completed() % min_write_ignore_freq == 0);
+    }
 
 private:
-    bool _cond_timedwait (uint64_t timeout_microsec);
-    w_rc_t _do_work ();
-    bool _exists_requested_work();
-    w_rc_t _clean_volume(const std::vector<bf_idx> &candidates);
-    w_rc_t _flush_write_buffer(size_t from, size_t consecutive, unsigned& cleaned_count);
-
-    /** the buffer pool this cleaner deals with. */
-    bf_tree_m*                  _bufferpool;
-
-    uint32_t _write_buffer_pages;
-    uint32_t _interval_millisec;
-
-    pthread_mutex_t             _interval_mutex;
-    pthread_cond_t              _interval_cond;
-
-    /** reused buffer of dirty page's indexes . */
-    std::vector<bf_idx>         _candidates_buffer;
-    /** reused buffer for sorting dirty page's indexes. */
-    uint64_t*                   _sort_buffer;
-    /** size of _sort_buffer. */
-    size_t                      _sort_buffer_size;
-
-    /** reused buffer to write out the content of dirty pages. */
-    generic_page*               _write_buffer;
-    bf_idx*                     _write_buffer_indexes;
+    void collect_candidates();
+    void clean_candidates();
+    void log_and_flush(size_t wpos);
+    bool latch_and_copy(PageID, bf_idx, size_t wpos);
 
     /**
-     * _volume_requests[vol] indicates whether the volume is requested
-     * to be flushed by force_volume() or force_all().
-     * When the corresponding worker observes this flag and completes
-     * flushing all dirty pages in the volume, the worker turns off the flag.
+     * List of candidate dirty frames to be considered for cleaning.
+     * We use two lists -- one is filled in parallel by the candidate collector
+     * thread and the other, already collected one, is used to copy and flush.
      */
-    bool               _requested_volume;
+    unique_ptr<vector<cleaner_cb_info>> next_candidates;
+    unique_ptr<vector<cleaner_cb_info>> curr_candidates;
 
-    /** @todo at some point the flags below should probably become std::atomic_flag's (or lintel
-        should be updated to include that type). I also think memory_order_consume would
-        be OK for the accesses, instead of the default memory_order_seq_cst, but thats an
-        exercise for another day, and a non-x86 architecture. */
-    /** whether this thread has been requested to stop. */
-    lintel::Atomic<bool> _stop_requested;
-    /** whether this thread has been requested to wakeup. */
-    lintel::Atomic<bool> _wakeup_requested;
+    /// Cleaner policy options
+    size_t num_candidates;
+    cleaner_policy policy;
 
-    /** whether any unexpected error happened in some cleaner. */
-    bool                        _error_happened;
+    /// Only write out clusters of pages with this minimum size
+    size_t min_write_size;
+
+    // Ignore min write size every N rounds (0 for never)
+    size_t min_write_ignore_freq;
+
+    /// Do not clean alloc/stnode pages, which are not managed in the buffer pool
+    bool ignore_metadata;
 };
+
+inline cleaner_policy make_cleaner_policy(string s)
+{
+    if (s == "highest_refcount") { return cleaner_policy::highest_refcount; }
+    if (s == "lowest_refcount") { return cleaner_policy::lowest_refcount; }
+    if (s == "oldest_lsn") { return cleaner_policy::oldest_lsn; }
+    if (s == "mixed") { return cleaner_policy::mixed; }
+    return cleaner_policy::oldest_lsn;
+}
 
 #endif // BF_TREE_CLEANER_H

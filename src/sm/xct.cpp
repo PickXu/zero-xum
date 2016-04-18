@@ -22,34 +22,18 @@
 
 #include <sm.h>
 #include "tls.h"
-#include "chkpt_serial.h"
 #include <sstream>
-#include "crash.h"
 #include "chkpt.h"
 #include "logrec.h"
 #include "bf_tree.h"
 #include "lock_raw.h"
 #include "log_lsn_tracker.h"
+#include "log_core.h"
 
 #include "allocator.h"
 
 const std::string xct_t::IMPL_NAME = "traditional";
 
-#ifdef EXPLICIT_TEMPLATE
-template class w_list_t<xct_t, queue_based_lock_t>;
-template class w_list_i<xct_t, queue_based_lock_t>;
-template class w_list_t<xct_dependent_t,queue_based_lock_t>;
-template class w_list_i<xct_dependent_t,queue_based_lock_t>;
-template class w_keyed_list_t<xct_t, queue_based_lock_t, tid_t>;
-template class w_descend_list_t<xct_t, queue_based_lock_t, tid_t>;
-template class w_list_t<stid_list_elem_t, queue_based_lock_t>;
-template class w_list_i<stid_list_elem_t, queue_based_lock_t>;
-template class w_auto_delete_array_t<lockid_t>;
-template class w_auto_delete_array_t<StoreID>;
-
-#endif /* __GNUG__*/
-
-// definition of LOGTRACE is in crash.h
 #define DBGX(arg) DBG(<<" th."<<me()->id << " " << "tid." << _tid  arg)
 
 // If we run into btree shrinking activity, we'll bump up the
@@ -248,8 +232,6 @@ xct_t::xct_core::xct_core(tid_t const &t, state_t s, timeout_in_ms timeout)
     _threads_attached(0),
     _state(s),
     _read_only(false),
-    _storesToFree(stid_list_elem_t::link_offset(), &_1thread_xct),
-    _loadStores(stid_list_elem_t::link_offset(), &_1thread_xct),
     _xct_ended(0), // for assertions
     _xct_aborting(0)
 {
@@ -385,7 +367,6 @@ xct_t::xct_core::~xct_core()
  *********************************************************************/
 xct_t::~xct_t()
 {
-    FUNC(xct_t::~xct_t);
     w_assert9(__stats == 0);
 
     if (!_sys_xct && smlevel_0::log) {
@@ -866,9 +847,6 @@ operator<<(ostream& o, const xct_t& x)
     print_timeout(o, x.timeout_c());
     o << " first_lsn=" << x._first_lsn << " last_lsn=" << x._last_lsn << "\n" << "   ";
 
-    o << " num_storesToFree=" << x._core->_storesToFree.num_members()
-      << " num_loadStores=" << x._core->_loadStores.num_members() << "\n" << "   ";
-
     o << " in_compensated_op=" << x._in_compensated_op << " anchor=" << x._anchor;
 
     if(x.raw_lock_xct()) {
@@ -908,7 +886,6 @@ xct_t::_teardown(bool is_chaining) {
 void
 xct_t::change_state(state_t new_state)
 {
-    FUNC(xct_t::change_state);
     w_assert1(one_thread_attached());
 
     // Acquire a write latch, the traditional read latch is used by checkpoint
@@ -1008,7 +985,6 @@ xct_t::update_threads() const
 rc_t
 xct_t::add_dependent(xct_dependent_t* dependent)
 {
-    FUNC(xct_t::add_dependent);
     CRITICAL_SECTION(xctstructure, *this);
     w_assert9(dependent->_link.member_of() == 0);
 
@@ -1020,7 +996,6 @@ xct_t::add_dependent(xct_dependent_t* dependent)
 rc_t
 xct_t::remove_dependent(xct_dependent_t* dependent)
 {
-    FUNC(xct_t::remove_dependent);
     CRITICAL_SECTION(xctstructure, *this);
     w_assert9(dependent->_link.member_of() != 0);
 
@@ -1043,7 +1018,6 @@ xct_t::remove_dependent(xct_dependent_t* dependent)
 bool
 xct_t::find_dependent(xct_dependent_t* ptr)
 {
-    FUNC(xct_t::find_dependent);
     xct_dependent_t        *d;
     CRITICAL_SECTION(xctstructure, *this);
     w_assert1(is_1thread_xct_mutex_mine());
@@ -1578,10 +1552,6 @@ xct_t::_flush_logbuf()
             _last_log = 0;
             W_DO(log->insert(*l, &_last_lsn));
 
-            LOGTRACE( << setiosflags(ios::right) << _last_lsn
-                      << resetiosflags(ios::right) << " I: " << *l
-                      );
-
             LOGREC_ACCOUNT(*l, !consuming); // see logrec.h
 
             // log insert effectively set_lsn to the lsn of the *next* byte of
@@ -1642,11 +1612,14 @@ xct_t::get_logbuf(logrec_t*& ret, int t)
 
 void xct_t::_update_page_lsns(const fixable_page_h *page, const lsn_t &new_lsn) {
     if (page != NULL) {
+        // CS TODO: BUG! latch must always be EX for per-page log chain consistency
         if (page->latch_mode() == LATCH_EX) {
-            const_cast<fixable_page_h*>(page)->update_initial_and_last_lsn(new_lsn);
+            const_cast<fixable_page_h*>(page)->update_page_lsn(new_lsn);
             // CS: already setting dirty below
             //const_cast<fixable_page_h*>(page)->set_dirty();
         } else {
+            // CS TODO: this does not work! Fix eviction and get rid of this!
+            w_assert0(false);
             // In some log type (so far only log_page_evict), we might update LSN only with
             // SH latch. In that case, we might have a race to update the LSN.
             // We should leave a larger value of LSN in that case.
@@ -1661,26 +1634,24 @@ void xct_t::_update_page_lsns(const fixable_page_h *page, const lsn_t &new_lsn) 
                     break;
                 }
             }
-            w_assert1(page->lsn() >= new_lsn);
+            w_assert1(page->get_page_lsn() >= new_lsn);
         }
-        const_cast<fixable_page_h*>(page)->set_dirty();
     }
 }
 
 rc_t
 xct_t::give_logbuf(logrec_t* l, const fixable_page_h *page, const fixable_page_h *page2)
 {
-    FUNC(xct_t::give_logbuf);
     // set page LSN chain
     if (page != NULL) {
-        l->set_page_prev_lsn(page->lsn());
+        l->set_page_prev_lsn(page->get_page_lsn());
         if (page2 != NULL) {
             // For multi-page log, also set LSN chain with a branch.
             w_assert1(l->is_multi_page());
             w_assert1(l->is_single_sys_xct());
             multi_page_log_t *multi = l->data_ssx_multi();
             w_assert1(multi->_page2_pid != 0);
-            multi->_page2_prv = page2->lsn();
+            multi->_page2_prv = page2->get_page_lsn();
         }
     }
     // If it's a log for piggy-backed SSX, we call log->insert without updating _last_log
@@ -1726,7 +1697,6 @@ xct_t::give_logbuf(logrec_t* l, const fixable_page_h *page, const fixable_page_h
 void
 xct_t::release_anchor( bool and_compensate ADD_LOG_COMMENT_SIG )
 {
-    FUNC(xct_t::release_anchor);
 
 #if X_LOG_COMMENT_ON
     if(and_compensate) {
@@ -1757,7 +1727,6 @@ xct_t::release_anchor( bool and_compensate ADD_LOG_COMMENT_SIG )
         // Now see if this last item was supposed to be
         // compensated:
         if(and_compensate && (_anchor != lsn_t::null)) {
-           VOIDSSMTEST("compensate");
            if(_last_log) {
                if ( _last_log->is_cpsn()) {
                     DBGX(<<"already compensated");
@@ -1979,12 +1948,10 @@ xct_t::_compensate(const lsn_t& lsn, bool undoable)
 rc_t
 xct_t::rollback(const lsn_t &save_pt)
 {
-    FUNC(xct_t::rollback);
-
 #ifdef USE_ATOMIC_COMMIT
-    ss_m::errlog->clog  << emerg_prio
+    cerr
     << "Rollback to a save point not yet supported in atomic commit protocol"
-    << flushl;
+    << endl;
     return RC(eNOABORT);
 #endif
 
@@ -1996,14 +1963,13 @@ xct_t::rollback(const lsn_t &save_pt)
     w_assert0(update_threads()<=1);
 
     if(!log) {
-        ss_m::errlog->clog  << emerg_prio
+        cerr
         << "Cannot roll back with logging turned off. "
-        << flushl;
+        << endl;
         return RC(eNOABORT);
     }
 
     w_rc_t            rc;
-    logrec_t*         buf =0;
 
     if(_in_compensated_op > 0) {
         w_assert3(save_pt >= _anchor);
@@ -2021,45 +1987,22 @@ xct_t::rollback(const lsn_t &save_pt)
 
     // undo_nxt is the lsn of last recovery log for this txn
     lsn_t nxt = _undo_nxt;
+    W_DO(log->flush(nxt));
 
     DBGOUT3(<<"Initial rollback, from: " << nxt << " to: " << save_pt);
-    LOGTRACE( << setiosflags(ios::right) << nxt
-              << resetiosflags(ios::right)
-              << " Roll back " << " " << tid()
-              << " to " << save_pt );
 
-    { // Contain the scope of the following __copy__buf:
-
-    logrec_t* __copy__buf = new logrec_t; // auto-del
-    if(! __copy__buf)
-        { W_FATAL(eOUTOFMEMORY); }
-    w_auto_delete_t<logrec_t> auto_del(__copy__buf);
-    logrec_t&         r = *__copy__buf;
+    logrec_t* lrbuf = new logrec_t;
 
     while (save_pt < nxt)
     {
-        rc =  log->fetch(nxt, buf, 0, true);
+        rc =  log->fetch(nxt, lrbuf, 0, true);
         if(rc.is_error() && rc.err_num()==eEOF)
         {
-            LOGTRACE2( << "U: end of log looking to fetch nxt=" << nxt);
             DBGX(<< " fetch returns EOF" );
-            log->release();
             goto done;
         }
-        else
-        {
-             LOGTRACE2( << "U: fetch nxt=" << nxt << "  returns rc=" << rc);
-
-             logrec_t& temp = *buf;
-             w_assert3(!temp.is_skip());
-
-             /* Only copy the valid portion of
-              * the log record, then release it
-              */
-             memcpy(__copy__buf, &temp, temp.length());
-
-             log->release();
-        }
+        w_assert3(!lrbuf->is_skip());
+        logrec_t& r = *lrbuf;
 
         DBGOUT1(<<"Rollback, current undo lsn: " << nxt);
 
@@ -2072,10 +2015,7 @@ xct_t::rollback(const lsn_t &save_pt)
             /*
              *  Undo action of r.
              */
-            LOGTRACE1( << setiosflags(ios::right) << nxt
-                      << resetiosflags(ios::right) << " U: " << r );
 
-            PageID pid = r.pid();
             fixable_page_h page;
 
             // CS TODO: ALL undo should be logical
@@ -2087,7 +2027,6 @@ xct_t::rollback(const lsn_t &save_pt)
             {
                 // A compensation log record
                 w_assert1(r.is_undoable_clr());
-                LOGTRACE2( << "U: compensating to " << r.undo_nxt() );
                 nxt = r.undo_nxt();
                 DBGOUT1(<<"Rollback, log record is compensation, undo_nxt: " << nxt);
             }
@@ -2095,16 +2034,12 @@ xct_t::rollback(const lsn_t &save_pt)
             {
                 // Not a compensation log record, use xid_prev() which is
                 // previous logrec of this xct
-                LOGTRACE2( << "U: undoing to " << r.xid_prev() );
                 nxt = r.xid_prev();
                 DBGOUT1(<<"Rollback, log record is not compensation, xid_prev: " << nxt);
             }
         }
         else  if (r.is_cpsn())
         {
-            LOGTRACE2( << setiosflags(ios::right) << nxt
-                      << resetiosflags(ios::right) << " U: " << r
-                      << " compensating to " << r.undo_nxt() );
             if (r.is_single_sys_xct())
             {
                 nxt = lsn_t::null;
@@ -2119,9 +2054,6 @@ xct_t::rollback(const lsn_t &save_pt)
         else
         {
             // r is not undoable
-            LOGTRACE2( << setiosflags(ios::right) << nxt
-               << resetiosflags(ios::right) << " U: " << r
-               << " skipping to " << r.xid_prev());
             if (r.is_single_sys_xct())
             {
                 nxt = lsn_t::null;
@@ -2134,9 +2066,7 @@ xct_t::rollback(const lsn_t &save_pt)
         }
     }
 
-    // close scope so the
-    // auto-release will free the log rec copy buffer, __copy__buf
-    }
+    delete lrbuf;
 
     _undo_nxt = nxt;
     _read_watermark = lsn_t::null;
@@ -2161,7 +2091,6 @@ done:
 void
 xct_t::attach_thread()
 {
-    FUNC(xct_t::attach_thread);
     smthread_t *thr = g_me();
     CRITICAL_SECTION(xctstructure, *this);
 
@@ -2180,7 +2109,6 @@ xct_t::attach_thread()
 void
 xct_t::detach_thread()
 {
-    FUNC(xct_t::detach_thread);
     CRITICAL_SECTION(xctstructure, *this);
     w_assert3(is_1thread_xct_mutex_mine());
     _core->_threads_attached--;
@@ -2298,7 +2226,6 @@ xct_t::restore_log_state(switch_t s, bool n )
     (void) set_log_state(s, n);
 }
 
-NORET
 xct_dependent_t::xct_dependent_t(xct_t* xd) : _xd(xd), _registered(false)
 {
 }
@@ -2314,7 +2241,6 @@ xct_dependent_t::register_me() {
     _registered = true;
 }
 
-NORET
 xct_dependent_t::~xct_dependent_t()
 {
     w_assert2(_registered);

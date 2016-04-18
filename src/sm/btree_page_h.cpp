@@ -12,12 +12,11 @@
 #include "vec_t.h"
 #include "btree_page_h.h"
 #include "btree_impl.h"
-#include "sm_du_stats.h"
-#include "crash.h"
 #include "w_key.h"
 #include <string>
 #include <algorithm>
 #include "restart.h"
+#include "log_core.h"
 
 
 PageID btree_page_h::pid0() const
@@ -48,7 +47,6 @@ PageID btree_page_h::child(slotid_t slot) const
 
 btrec_t&
 btrec_t::set(const btree_page_h& page, slotid_t slot) {
-    FUNC(btrec_t::set);
     w_assert3(slot >= 0 && slot < page.nrecs());
 
     _elem.reset();
@@ -238,9 +236,6 @@ rc_t btree_page_h::format_steal(lsn_t            new_lsn,         // LSN of the 
     // log as one record
     if (log_it) {
         W_DO(log_page_img_format(*this));
-#ifndef USE_ATOMIC_COMMIT // otherwise LSN is only set at commit time
-        w_assert1(lsn().valid() || !smlevel_0::logging_enabled);
-#endif
     }
 
     // This is the only place where a page format log record is being generated,
@@ -250,7 +245,8 @@ rc_t btree_page_h::format_steal(lsn_t            new_lsn,         // LSN of the 
     // page format log record so everything can be REDO
     // Set the _rec_lsn using the new_lsn (which is the last write LSN) if _rec_lsn is later than
     // new_lsn.
-    smlevel_0::bf->set_initial_rec_lsn(pid, new_lsn, smlevel_0::log->curr_lsn());
+    // CS TODO: no more rec_lsn on control blocks
+    // smlevel_0::bf->set_initial_rec_lsn(pid, new_lsn, smlevel_0::log->curr_lsn());
 
     return RCOK;
 }
@@ -276,7 +272,6 @@ rc_t btree_page_h::format_foster_child(btree_page_h& parent,
 
     // Initialize fields
     page()->lsn = lsn_t::null;
-    page()->clsn = lsn_t::null;
     page()->pid = new_page_id;
     page()->store = parent.store();
     page()->tag = t_btree_p;
@@ -952,9 +947,6 @@ rc_t btree_page_h::init_fence_keys(
     if (false == update_fence)
         return RCOK;
 
-    // Set the page dirty
-    set_dirty();
-
     // Delete records from page, number_of_items() is the actual
     // record count including the fence key record which is not an actual record
     // 'remove_count' is the number of records to remove from the page
@@ -992,7 +984,7 @@ rc_t btree_page_h::norecord_split (PageID foster, lsn_t foster_emlsn,
         ::memcpy (&scratch, _pp, sizeof(scratch));
         btree_page_h scratch_p;
         scratch_p.fix_nonbufferpool_page(&scratch);
-        W_DO(format_steal(scratch_p.lsn(), scratch_p.pid(), scratch_p.store(),
+        W_DO(format_steal(get_page_lsn(), scratch_p.pid(), scratch_p.store(),
                           scratch_p.btree_root(), scratch_p.level(),
                           scratch_p.pid0(), scratch_p.get_pid0_emlsn(),
                           foster, foster_emlsn,
@@ -1000,8 +992,8 @@ rc_t btree_page_h::norecord_split (PageID foster, lsn_t foster_emlsn,
                           false, // don't log it
                           &scratch_p, 0, scratch_p.nrecs()
         ));
-        update_initial_and_last_lsn(scratch.lsn); // format_steal() also clears lsn, so recover it from the copied page
-        update_clsn(scratch.lsn);
+        // format_steal() also clears lsn, so recover it from the copied page
+        update_page_lsn(scratch.lsn);
     } else {
         // otherwise, just sets the fence keys and headers
         //sets new fence
@@ -1196,7 +1188,6 @@ btree_page_h::robust_search(const char *key_raw, size_t key_raw_len,
 void btree_page_h::search_node(const w_keystr_t& key,
                                slotid_t&         return_slot) const {
     w_assert1(!is_leaf());
-    FUNC(btree_page_h::_search_node);
 
     bool found_key;
     search(key, found_key, return_slot);
@@ -1236,7 +1227,6 @@ void btree_page_h::_update_btree_consecutive_skewed_insertions(slotid_t slot) {
 
 rc_t btree_page_h::insert_node(const w_keystr_t &key, slotid_t slot, PageID child,
     const lsn_t& child_emlsn) {
-    FUNC(btree_page_h::insert);
 
     w_assert1(is_node());
     w_assert1(slot >= 0 && slot <= nrecs()); // <= intentional to allow appending
@@ -1499,13 +1489,11 @@ void btree_page_h::insert_nonghost(const w_keystr_t &key, const cvec_t &elem) {
 void btree_page_h::mark_ghost(slotid_t slot) {
     w_assert1(!page()->is_ghost(slot+1));
     page()->set_ghost(slot+1);
-    set_dirty();
 }
 
 void btree_page_h::unmark_ghost(slotid_t slot) {
     w_assert1(page()->is_ghost(slot+1));
     page()->unset_ghost(slot+1);
-    set_dirty();
 }
 
 
@@ -1929,7 +1917,6 @@ rc_t btree_page_h::defrag( const bool full_logging_redo) {
     }
 
     page()->compact();
-    set_dirty();
 
     return RCOK;
 }
@@ -2027,8 +2014,6 @@ void btree_page_h::_init(lsn_t lsn, PageID page_id, StoreID store,
 #endif //ZERO_INIT
 
     page()->lsn          = lsn;
-    // CS: clsn set to null here -- committing TA will update it properly
-    page()->clsn = lsn_t::null;
     page()->pid          = page_id;
     page()->store        = store;
     page()->tag          = t_btree_p;

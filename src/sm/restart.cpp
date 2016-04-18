@@ -61,9 +61,7 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 
 #include "sm_base.h"
 #include "w_heap.h"
-#include "crash.h"
 #include "sm_base.h"
-#include "sm_du_stats.h"
 #include "sm_base.h"
 #include "btree_impl.h"         // Lock re-acquisition
 #include "restart.h"
@@ -168,9 +166,8 @@ restart_m::redo_log_pass()
     if(redo_lsn < cur_lsn) {
         DBGOUT3(<< "Redoing log from " << redo_lsn
                 << " to " << cur_lsn);
-        smlevel_0::errlog->clog << info_prio
-            << "Redoing log from " << redo_lsn
-            << " to " << cur_lsn << flushl;
+        cerr << "Redoing log from " << redo_lsn
+            << " to " << cur_lsn << endl;
     }
     DBGOUT3( << "LSN " << " A/R/I(pass): " << "LOGREC(TID, TYPE, FLAGS:F/U(fwd/rolling-back) PAGE <INFO>");
 
@@ -180,7 +177,6 @@ restart_m::redo_log_pass()
     lsn_t lsn;
     lsn_t expected_lsn = redo_lsn;
     bool redone = false;
-    int cnt1=0,cnt2=0;
     while (scan.xct_next(lsn, r))
     {
         if ((lsn > end_logscan_lsn))
@@ -238,7 +234,6 @@ restart_m::redo_log_pass()
                         {
                             DBGOUT3(<<"redo - no page, xct is " << r.tid());
                             r.redo(0);
-			    cnt1++;
 
                             // No page involved, no need to update dirty_count
                             redone = true;
@@ -294,12 +289,10 @@ restart_m::redo_log_pass()
                 // aborted transaction (aborted txn are not kept in transaction table).
 
                 _redo_log_with_pid(r, r.pid(), redone, dirty_count);
-		cnt2++;
                 if (r.is_multi_page())
                 {
                     w_assert1(r.is_single_sys_xct());
                     _redo_log_with_pid(r, r.pid2(), redone, dirty_count);
-		    cnt2++;
                 }
             }
         }
@@ -331,7 +324,6 @@ restart_m::redo_log_pass()
 
     ADD_TSTAT(restart_redo_time, timer.time_us());
     sysevent::log(logrec_t::t_redo_done);
-    cout << "Redo logs: " << cnt1 << "; Redo pages: " << cnt2 << endl;
 }
 
 /*********************************************************************
@@ -375,8 +367,6 @@ void restart_m::_redo_log_with_pid(logrec_t& r, PageID pid,
 
         w_assert1(page.is_fixed());
         r.redo(&page);
-        page.update_initial_and_last_lsn(r.lsn());
-        page.update_clsn(r.lsn());
         redone = true;
         ++dirty_count;
     }

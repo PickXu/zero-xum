@@ -5,6 +5,7 @@
 
 #include "logarchiver.h"
 #include "sm_options.h"
+#include "log_core.h"
 
 #include <algorithm>
 #include <sm_base.h>
@@ -136,14 +137,10 @@ rc_t LogArchiver::ReaderThread::openPartition()
 
     // open file for read -- copied from partition_t::peek()
     int fd;
-    char *const fname = new char[smlevel_0::max_devname];
-    if (!fname) W_FATAL(fcOUTOFMEMORY);
-    w_auto_delete_array_t<char> ad_fname(fname);
-    smlevel_0::log->make_log_name(nextPartition, fname,
-            smlevel_0::max_devname);
+    string fname = smlevel_0::log->make_log_name(nextPartition);
 
     int flags = smthread_t::OPEN_RDONLY;
-    W_COERCE(me()->open(fname, flags, 0744, fd));
+    W_COERCE(me()->open(fname.c_str(), flags, 0744, fd));
 
     sthread_base_t::filestat_t statbuf;
     W_DO(me()->fstat(fd, statbuf));
@@ -290,7 +287,7 @@ void LogArchiver::WriterThread::run()
 
         DBGTHRD(<< "Picked block for write " << (void*) src);
 
-        int run = BlockAssembly::getRunFromBlock(src);
+        run_number_t run = BlockAssembly::getRunFromBlock(src);
         if (currentRun != run) {
             // when writer is restarted, currentRun resets to zero
             w_assert1(currentRun == 0 || run == currentRun + 1);
@@ -345,7 +342,7 @@ LogArchiver::LogArchiver(const sm_options& options)
     flushReqLSN(lsn_t::null)
 {
     std::string archdir = options.get_string_option("sm_archdir", "");
-    size_t workspaceSize = 
+    size_t workspaceSize = 1024 * 1024 * // convert MB -> B
         options.get_int_option("sm_archiver_workspace_size", DFT_WSPACE_SIZE);
     size_t blockSize =
         options.get_int_option("sm_archiver_block_size", DFT_BLOCK_SIZE);
@@ -470,9 +467,8 @@ os_dirent_t* LogArchiver::ArchiveDirectory::scanDir(os_dir_t& dir)
     if (dir == NULL) {
         dir = os_opendir(archdir.c_str());
         if (!dir) {
-            smlevel_0::errlog->clog << fatal_prio <<
-                "Error: could not open log archive dir: " <<
-                archdir << flushl;
+            cerr << "Error: could not open log archive dir: " <<
+                archdir << endl;
             W_COERCE(RC(eOS));
         }
         //DBGTHRD(<< "Opened log archive directory " << archdir);
@@ -486,6 +482,7 @@ LogArchiver::ArchiveDirectory::ArchiveDirectory(std::string archdir,
     : archdir(archdir),
     appendFd(-1), mergeFd(-1), appendPos(0), blockSize(blockSize)
 {
+    // CS TODO: use boost, just like log_storage
     // open archdir and extract last archived LSN
     {
         lsn_t highestLSN = lsn_t::null;
@@ -509,8 +506,7 @@ LogArchiver::ArchiveDirectory::ArchiveDirectory(std::string archdir,
                 DBGTHRD(<< "Found unfinished log archive run. Deleting");
                 string path = archdir + "/" + runName;
                 if (unlink(path.c_str()) < 0) {
-                    smlevel_0::errlog->clog << fatal_prio
-                        << "Log archiver: failed to delete "
+                    cerr << "Log archiver: failed to delete "
                         << runName << endl;
                     W_FATAL(fcOS);
                 }
@@ -529,24 +525,19 @@ LogArchiver::ArchiveDirectory::ArchiveDirectory(std::string archdir,
     // no runs found in archive log -- start from first available partition
     if (startLSN.hi() == 0 && smlevel_0::log) {
         int nextPartition = startLSN.hi();
-        char *const fname = new char[smlevel_0::max_devname];
-        if (!fname) W_FATAL(fcOUTOFMEMORY);
 
         int max = smlevel_0::log->durable_lsn().hi();
 
         while (nextPartition <= max) {
-            smlevel_0::log->make_log_name(nextPartition, fname,
-                    smlevel_0::max_devname);
+            string fname = smlevel_0::log->make_log_name(nextPartition);
 
             // check if file exists
             struct stat st;
-            if (stat(fname, &st) == 0) {
+            if (stat(fname.c_str(), &st) == 0) {
                 break;
             }
             nextPartition++;
         }
-
-        delete[] fname;
 
         if (nextPartition > max) {
             W_FATAL_MSG(fcINTERNAL,
@@ -686,9 +677,6 @@ rc_t LogArchiver::ArchiveDirectory::closeCurrentRun(lsn_t runEndLSN)
             fname << archdir << "/" << LogArchiver::RUN_PREFIX
                 << lastLSN << "-" << runEndLSN;
 
-            std::string currentFName = archdir + "/" + CURR_RUN_FILE;
-            W_DO(me()->frename(appendFd, currentFName.c_str(), fname.str().c_str()));
-
             // register index information and write it on end of file
             if (archIndex && appendPos > 0) {
                 // take into account space for skip log record
@@ -698,6 +686,9 @@ rc_t LogArchiver::ArchiveDirectory::closeCurrentRun(lsn_t runEndLSN)
                 appendPos += blockSize;
                 archIndex->finishRun(lastLSN, runEndLSN, appendFd, appendPos);
             }
+
+            std::string currentFName = archdir + "/" + CURR_RUN_FILE;
+            W_DO(me()->frename(appendFd, currentFName.c_str(), fname.str().c_str()));
 
             DBGTHRD(<< "Closing current output run: " << fname.str());
         }
@@ -950,7 +941,7 @@ bool LogArchiver::selection()
         return false;
     }
 
-    int run = heap->topRun();
+    run_number_t run = heap->topRun();
     if (!blkAssemb->start(run)) {
         return false;
     }
@@ -1006,7 +997,7 @@ bool LogArchiver::BlockAssembly::hasPendingBlocks()
     return !writebuf->isEmpty();
 }
 
-int LogArchiver::BlockAssembly::getRunFromBlock(const char* b)
+run_number_t LogArchiver::BlockAssembly::getRunFromBlock(const char* b)
 {
     BlockHeader* h = (BlockHeader*) b;
     return h->run;
@@ -1024,7 +1015,7 @@ size_t LogArchiver::BlockAssembly::getEndOfBlock(const char* b)
     return h->end;
 }
 
-bool LogArchiver::BlockAssembly::start(int run)
+bool LogArchiver::BlockAssembly::start(run_number_t run)
 {
     DBGTHRD(<< "Requesting write block for selection");
     dest = writebuf->producerRequest();
@@ -1553,6 +1544,10 @@ void LogArchiver::replacement()
             return;
         }
 
+        if (!lr->is_redo()) {
+            continue;
+        }
+
         pushIntoHeap(lr, lr->is_multi_page());
     }
 }
@@ -1729,6 +1724,14 @@ bool LogArchiver::shouldActivate(bool logTooSlow)
             (control.endLSN.lo() / directory->getBlockSize());
         control.endLSN = lsn_t(control.endLSN.hi(), boundary);
         if (control.endLSN <= nextActLSN) {
+            return false;
+        }
+        if (control.endLSN.lo() == 0) {
+            // If durable_lsn is at the beginning of a new log partition,
+            // it can happen that at this point the file was not created
+            // yet, which would cause the reader thread to fail. This does
+            // not happen with eager archiving, so we should eventually
+            // remove it
             return false;
         }
         DBGTHRD(<< "Adjusted activation window to block boundary " <<
@@ -2034,6 +2037,7 @@ rc_t LogArchiver::ArchiveIndex::finishRun(lsn_t first, lsn_t last, int fd,
         fileoff_t offset)
 {
     CRITICAL_SECTION(cs, mutex);
+    w_assert1(offset % blockSize == 0);
 
     // check if it isn't an empty run (from truncation)
     if (offset > 0 && lastFinished < (int) runs.size()) {

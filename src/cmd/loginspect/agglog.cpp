@@ -32,8 +32,11 @@ void AggLog::run()
         }
     }
 
+    // if no logrec types given, aggregate all types
     if (filter.none()) {
-        throw runtime_error("AggLog requires at least one valid logrec type");
+        for (int i = 0; i < logrec_t::t_max_logrec; i++) {
+            filter.set(i);
+        }
     }
 
     logrec_t::kind_t begin = logrec_t::t_max_logrec;
@@ -61,7 +64,7 @@ void AggLog::run()
     if (end != logrec_t::t_max_logrec) { filter.set(end); }
 
     BaseScanner* s = getScanner(&filter);
-    s->any_handlers.push_back(&h);
+    s->add_handler(&h);
     s->fork();
     s->join();
     delete s;
@@ -89,7 +92,7 @@ AggregateHandler::AggregateHandler(bitset<logrec_t::t_max_logrec> filter,
             cout << " " << logrec_t::get_type_str((logrec_t::kind_t) i);
         }
     }
-    cout << flushl;
+    cout << endl;
 }
 
 void AggregateHandler::invoke(logrec_t& r)
@@ -128,7 +131,7 @@ void AggregateHandler::dumpCounts()
             counts[i] = 0;
         }
     }
-    cout << flushl;
+    cout << endl;
 }
 
 void AggregateHandler::finalize()

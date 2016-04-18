@@ -16,7 +16,6 @@
 #include "sm_base.h"
 #include "btree_page_h.h"
 #include "btree_impl.h"
-#include "crash.h"
 #include "w_key.h"
 #include "xct.h"
 #include "vol.h"
@@ -33,7 +32,7 @@ rc_t btree_impl::_ux_create_tree_core(const StoreID& stid, const PageID& root_pi
     supremum.construct_posinfkey();
     w_assert1(supremum.is_constructed());
     W_DO(page.fix_root(stid, LATCH_EX, false, true));
-    W_DO(page.format_steal(page.lsn(), root_pid, stid, root_pid,
+    W_DO(page.format_steal(page.get_page_lsn(), root_pid, stid, root_pid,
                            1, // level=1. initial tree has only one level
                            0, lsn_t::null,// no pid0
                            0, lsn_t::null,// no foster child
@@ -47,7 +46,6 @@ rc_t btree_impl::_ux_create_tree_core(const StoreID& stid, const PageID& root_pi
 rc_t
 btree_impl::_sx_shrink_tree(btree_page_h& rp)
 {
-    FUNC(btree_impl::_sx_shrink_tree);
     if( rp.nrecs() > 0 || rp.get_foster() != 0) {
         // then still not the time for shrink
         W_DO (_sx_adopt_foster_all_core (rp, true, false));
@@ -87,9 +85,9 @@ btree_impl::_ux_shrink_tree_core(btree_page_h& rp)
         cp.copy_fence_low_key(fence_low);
         cp.copy_fence_high_key(fence_high);
         cp.copy_chain_fence_high_key(dummy_chain_high);
-        W_DO(rp.format_steal(rp.lsn(), rp_pid, rp.store(), rp_pid, // root page id is not changed.
+        W_DO(rp.format_steal(rp.get_page_lsn(), rp_pid, rp.store(), rp_pid, // root page id is not changed.
                              cp.level(), // one level shorter
-                             cp.pid(), cp.lsn(), // left-most is cp's left-most
+                             cp.pid(), cp.get_page_lsn(), // left-most is cp's left-most
                              cp.get_foster(), cp.get_foster_emlsn(),// foster is cp's foster
                              fence_low, fence_high, dummy_chain_high,
                              true, // log it to avoid write-order dependency. anyway it's very rare!
@@ -102,7 +100,7 @@ btree_impl::_ux_shrink_tree_core(btree_page_h& rp)
         w_keystr_t infimum, supremum, dummy_chain_high;
         infimum.construct_neginfkey();
         supremum.construct_posinfkey();
-        W_DO(rp.format_steal(rp.lsn(), rp_pid, rp.store(),
+        W_DO(rp.format_steal(rp.get_page_lsn(), rp_pid, rp.store(),
                              rp_pid, // root page id is not changed.
                              1, // root is now leaf
                              0, lsn_t::null, // leaf has no pid0
@@ -117,7 +115,6 @@ btree_impl::_ux_shrink_tree_core(btree_page_h& rp)
 rc_t
 btree_impl::_sx_grow_tree(btree_page_h& rp)
 {
-    FUNC(btree_impl::_sx_grow_tree);
     PageID new_pid;
     // allocate a page as separate system transaction
     W_DO(smlevel_0::vol->alloc_a_page(new_pid));
@@ -146,7 +143,7 @@ btree_impl::_sx_grow_tree(btree_page_h& rp)
 
     btree_page_h cp;
     W_DO(cp.fix_nonroot(rp, new_pid, LATCH_EX, false, true));
-    W_DO(cp.format_steal(cp.lsn(), new_pid, rp.store(), rp.pid(), rp.level(),
+    W_DO(cp.format_steal(cp.get_page_lsn(), new_pid, rp.store(), rp.pid(), rp.level(),
         rp.pid0(), rp.get_pid0_emlsn(), // copy pid0 of root too
         rp.get_foster(), rp.get_foster_emlsn(),
                          cp_fence_low, cp_fence_high, cp_chain_high, // use current root's fence keys
@@ -158,10 +155,10 @@ btree_impl::_sx_grow_tree(btree_page_h& rp)
     w_keystr_t infimum, supremum, dummy_chain_high;
     infimum.construct_neginfkey();
     supremum.construct_posinfkey();
-    W_DO(rp.format_steal(rp.lsn(), rp.pid(), rp.store(),
+    W_DO(rp.format_steal(rp.get_page_lsn(), rp.pid(), rp.store(),
                          rp.pid(), // root page id is not changed.
                          rp.level() + 1, // grow one level
-                         cp.pid(), cp.lsn(), // left-most is cp
+                         cp.pid(), cp.get_page_lsn(), // left-most is cp
                          0, lsn_t::null,// no foster
                             infimum, supremum, dummy_chain_high // empty fence keys=infimum-supremum
              )); // nothing to steal

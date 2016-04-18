@@ -6,7 +6,6 @@
 #define BF_TREE_CB_H
 
 #include "w_defines.h"
-#include "bf_idx.h"
 #include "latch.h"
 #include "bf_tree.h"
 #include <string.h>
@@ -50,29 +49,6 @@
  * atomic-inc when for some reason you are sure there are at least one more pins on the
  * block, such as when you are incrementing for the case of 3) above.
  *
- *
- * \Section Careful-Write-Order
- *
- * To avoid logging some physical actions such as page split, we implemented careful write
- * ordering in bufferpool.  For simplicity and scalability, we restrict 2 things on
- * careful-write-order.
- *
- * One is obvious.  We don't allow a cycle in dependency.  Another isn't.  We don't allow
- * one page to be dependent (written later than) to more than one pages.
- *
- * We once had an implementation of write order dependency without the second restriction,
- * but we needed std::list in each block with pointers in both directions.  Quite
- * heavy-weight.  So, while the second surgery, we made it much simpler and scalable by
- * adding the restriction.
- *
- * Because of this restriction, we don't need a fancy data structure to maintain
- * dependency.  It's just one pointer from a control block to another.  And we don't have
- * back pointers.  The pointer is lazily left until when the page is considered for
- * eviction.
- *
- * The drawback of this change is that page split/merge might have to give up using the
- * logging optimization more often, however it's anyway rare and the optimization can be
- * opportunistic rather than mandatory.
  */
 struct bf_tree_cb_t {
     /** clears all properties. */
@@ -99,24 +75,14 @@ struct bf_tree_cb_t {
 
     // control block is bulk-initialized by malloc and memset. It has to be aligned.
 
-    /// dirty flag; protected by our latch
-    bool _dirty;         // +1  -> 1
-
-    /// true if this block is actually used; protected by our latch
-    bool _used;          // +1  -> 2
-
-    // CS TODO: left placeholder for old vid_t to make sure code still works
-    /// volume ID of the page currently pinned on this block; protected by ??
-    uint16_t _fill4;       // +2  -> 4
-
     /**
      * short page ID of the page currently pinned on this block.  (we don't have stnum in
      * bufferpool) protected by ??
      */
-    PageID _pid_shpid;     // +4  -> 8
+    PageID _pid;     // +4  -> 4
 
     /// Count of pins on this block.  See class comments; protected by ??
-    int32_t _pin_cnt;       // +4 -> 12
+    int32_t _pin_cnt;       // +4 -> 8
 
     /**
      * Reference count (for clock algorithm).  Approximate, so not protected by latches.
@@ -126,102 +92,48 @@ struct bf_tree_cb_t {
      * between sockets).  The counter still has enough granularity to separate cold from
      * hot pages.  Clock decrements the counter when it visits the page.
      */
-    uint16_t                    _refbit_approximate;// +2  -> 14
+    uint16_t _ref_count;// +2  -> 10
 
-    /**
-     * Only used when the bufferpool maintains a child-to-parent pointer in each buffer
-     * frame.  Used to trigger LRU-update 'about' once in 100 or 1000, and so
-     * on.  Approximate, so not protected by latches.  We increment it whenever (re-)fixing
-     * the page in the bufferpool.
-     */
-    uint16_t                    _counter_approximate;// +2  -> 16
+    /// Reference count incremented only by X-latching
+    uint16_t _ref_count_ex; // +2 -> 12
 
-    /// recovery lsn; first lsn to make the page dirty; protected by ??
-    lsndata_t _rec_lsn;       // +8 -> 24
+    /// true if this block is actually used
+    bool _used;          // +1  -> 13
+    /// Whether this page is swizzled from the parent
+    bool _swizzled;      // +1 -> 14
+    /// Whether this page is concurrently being swizzled by another thread
+    bool _concurrent_swizzling;      // +1 -> 15
+    /// Filler
+    uint8_t _fill16;        // +1 -> 16
 
-    /// Pointer to the parent page.  zero for root pages; protected by ??
-    // TODO CS: NOT USED ANYMORE
-    bf_idx _parent;        // +4 -> 28
+    // CS TODO: testing approach of maintaining page LSN in CB
+    lsn_t _page_lsn; // +8 -> 24
+    void set_page_lsn(lsn_t lsn) { _page_lsn = lsn; }
+    lsn_t get_page_lsn() const { return _page_lsn; }
 
-    /// Whether this page is swizzled from the parent; protected by ??
-    bool                        _swizzled;      // +1 -> 29
+    // CS: page_lsn value when it was last picked for cleaning
+    // Replaces the old dirty flag, because dirty is defined as
+    // page_lsn > clean_lsn
+    lsn_t _clean_lsn; // +8 -> 32
+    void set_clean_lsn(lsn_t lsn) { _clean_lsn = lsn; }
+    lsn_t get_clean_lsn() const { return _clean_lsn; }
 
-    /// Whether this page is concurrently being swizzled by another thread; protected by ??
-    bool                        _concurrent_swizzling;      // +1 -> 30
+    bool is_dirty() const { return _page_lsn > _clean_lsn; }
 
-    /// replacement priority; protected by ??
-    char                        _replacement_priority;      // +1 -> 31
-
-    // CS TODO: replacing old in-doubt flag
-    uint8_t                        _filler32;      // +1 -> 32
-
-    /// if not zero, this page must be written out after this dependency page; protected by ??
-    bf_idx _dependency_idx;// +4 -> 36
-
-    /**
-     * used with _dependency_idx.  As of registration of the dependency, the page in
-     * _dependency_idx had this pid (volid was implicitly same as myself).  If now it's
-     * different, the page was written out and then evicted surely at/after
-     * _dependency_lsn, so that's fine.  protected by ??
-     */
-    PageID _dependency_shpid;// +4 -> 40
-
-    /**
-     * used with _dependency_idx.  this is the _rec_lsn of the dependent page as of the
-     * registration of the dependency.  So, if the _rec_lsn of the page is now strictly
-     * larger than this value, it was flushed at least once after that, so the dependency
-     * is resolved.  protected by ??
-     *
-     * Overload this field to use it as last_write_lsn for REDO Single-Page-Recovery purpose, we can
-     * overload this field because last_write_lsn is only used during the initial recover
-     * of a page through Single-Page-Recovery (as the emlsn), it is not used once a page has been
-     * recovered through Single-Page-Recovery after the system crash recover
-     * The last write lsn is identified during Log Analysis phase, when used as
-     * last_write_lsn, it is written during Log Analysis phase and read during
-     * REDO phase
-     */
-    lsndata_t _dependency_lsn;// +8 -> 48
 
     /**
      * number of swizzled pointers to children; protected by ??
      */
-    uint16_t                    _swizzled_ptr_cnt_hint; // +2 -> 50
+    uint16_t                    _swizzled_ptr_cnt_hint; // +2 -> 34
 
-    fill8                       _fill56;          // +1 -> 51
-
-    // CD TODO: replacing old recovery-access flag
-    uint8_t                       _fill52;       // +1 -> 52
-
-    // page store information, used for recovery purpose
-    //
-    StoreID                     _store_num;            // +4 -> 56
-
-    /*
-     * Counter of uncommitted updates in this page (Caetano).
-     * This gets incremented every time someone marks the page dirty.
-     * It gets decremented when a transaction goes through the atomic commit
-     * protocol, for each log record and thus for each update. The end effect
-     * is that a page is guaranteed to contain no committed updates if the
-     * counter value is zero. By writing back to disk only the pages that
-     * satisfy this condition, we essentially achieve a no-steal policy
-     * without page locks.
-     *
-     * During commit, the page is latched in shared mode, which means there
-     * may be multiple threads racing on the decrement operation. Therefore,
-     * it must be done atomically with lintel::unsafe::atomic_fetch_sub
-     */
-    uint16_t                    _uncommitted_cnt; // +2 -> 58
-    fill16                      _fill16_60;      // +2 -> 60
-
-    fill8                       _fill8_61;      // +1 -> 61
-    fill8                       _fill8_62;      // +1 -> 62
-    fill8                       _fill8_63;      // +1 -> 63
+    // Add padding to align control block at cacheline boundary (64 bytes)
+    uint8_t _fill63[29];    // +29 -> 63
 
 #ifdef BP_ALTERNATE_CB_LATCH
     /** offset to the latch to protect this page. */
     int8_t                      _latch_offset;  // +1 -> 64
 #else
-    fill8                       _fill8_64;      // +1 -> 64
+    fill8                       _fill64;      // +1 -> 64
     latch_t                     _latch;         // +64 ->128
 #endif
 

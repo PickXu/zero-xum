@@ -1,15 +1,5 @@
 #include "command.h"
 
-//#include "commands/logreplay.h"
-//#include "commands/verifylog.h"
-//#include "commands/dbstats.h"
-//#include "commands/agglog.h"
-//#include "commands/mergerestore.h"
-//#include "commands/cat.h"
-//#include "commands/skew.h"
-//#include "commands/dirtypagestats.h"
-//#include "commands/trace.h"
-
 #include "kits_cmd.h"
 #include "genarchive.h"
 #include "mergeruns.h"
@@ -18,11 +8,15 @@
 #include "verifylog.h"
 #include "truncatelog.h"
 #include "logstats.h"
+#include "propstats.h"
 #include "logpagestats.h"
 #include "dbinspect.h"
 #include "loganalysis.h"
 #include "experiments/restore_cmd.h"
 #include "replica.h"
+#include "dbscan.h"
+
+#include <boost/foreach.hpp>
 
 /*
  * Adapted from
@@ -46,15 +40,12 @@ void Command::init()
      * COMMANDS MUST BE REGISTERED HERE AND ONLY HERE
      */
     REGISTER_COMMAND("logcat", LogCat);
-    //REGISTER_COMMAND("skew", skew);
-    //REGISTER_COMMAND("trace", trace);
-    //REGISTER_COMMAND("dirtypagestats", dirtypagestats);
     //REGISTER_COMMAND("logreplay", LogReplay);
     REGISTER_COMMAND("genarchive", GenArchive);
     REGISTER_COMMAND("mergeruns", MergeRuns);
     REGISTER_COMMAND("verifylog", VerifyLog);
     REGISTER_COMMAND("truncatelog", TruncateLog);
-    //REGISTER_COMMAND("dbstats", DBStats);
+    REGISTER_COMMAND("dbscan", DBScan);
     REGISTER_COMMAND("agglog", AggLog);
     REGISTER_COMMAND("logstats", LogStats);
     REGISTER_COMMAND("logpagestats", LogPageStats);
@@ -64,6 +55,7 @@ void Command::init()
     REGISTER_COMMAND("restore", RestoreCmd);
     //xum
     REGISTER_COMMAND("replica", Replica);
+    REGISTER_COMMAND("propstats", PropStats);
 }
 
 void Command::setupCommonOptions()
@@ -122,7 +114,7 @@ Command* Command::parse(int argc, char ** argv)
     return NULL;
 }
 
-void Command::setupSMOptions()
+void Command::setupSMOptions(po::options_description& options)
 {
     boost::program_options::options_description smoptions("Storage Manager Options");
     smoptions.add_options()
@@ -154,10 +146,21 @@ void Command::setupSMOptions()
     ("sys-activecpucount", po::value<uint>()->default_value(0),
         "Active CPU Count of a system")
     /**SM Options**/
+    ("sm_logdir", po::value<string>()->default_value("log"),
+        "Path to log directory")
     ("sm_dbfile", po::value<string>()->default_value("db"),
         "Path to the file on which to store database pages")
-    ("sm_logsize", po::value<int>()->default_value(8192),
-        "Maximum space to be occupied by log in MB (also determines parition size)")
+    ("sm_format", po::value<bool>()->default_value(false),
+        "Format SM by emptying logdir and truncating DB file")
+    ("sm_truncate_log", po::value<bool>()->default_value(false)
+        ->implicit_value(true),
+        "Whether to truncate log partitions at SM shutdown")
+    ("sm_log_partition_size", po::value<int>()->default_value(1024),
+        "Size of a log partition in MB")
+    ("sm_log_max_partitions", po::value<int>()->default_value(0),
+        "Maximum number of partitions maintained in log directory")
+    ("sm_log_delete_old_partitions", po::value<bool>()->default_value(true),
+        "Whether to delete old log partitions as cleaner and chkpt make progress")
     ("sm_bufpoolsize", po::value<int>()->default_value(1024),
         "Size of buffer pool in MB")
     ("sm_fakeiodelay-enable", po::value<int>()->default_value(0),
@@ -191,6 +194,8 @@ void Command::setupSMOptions()
     ("sm_vol_readonly", po::value<bool>(),
         "Volume will be opened in read-only mode and all writes from buffer pool \
          will be ignored (uses write elision and single-page recovery)")
+    ("sm_vol_o_direct", po::value<bool>(),
+        "Whether to open volume (i.e., db file) with O_DIRECT")
     ("sm_restart_instant", po::value<bool>(),
         "Enable instant restart")
     ("sm_restart_log_based_redo", po::value<bool>(),
@@ -227,8 +232,18 @@ void Command::setupSMOptions()
         "Enable/Disable decoupled cleaner")
     ("sm_cleaner_interval_millisec", po::value<int>(),
         "Cleaner sleep interval in ms")
-    ("sm_cleaner_write_buffer_pages", po::value<int>(),
-        "Number of buffer pages to write")
+    ("sm_cleaner_workspace_size", po::value<int>(),
+        "Size of cleaner write buffer")
+    ("sm_cleaner_num_candidates", po::value<int>(),
+        "Number of candidate frames considered by each cleaner round")
+    ("sm_cleaner_policy", po::value<string>(),
+        "Policy used by cleaner to select candidates")
+    ("sm_cleaner_min_write_size", po::value<int>(),
+        "Page cleaner only writes clusters of pages with this minimum size")
+    ("sm_cleaner_min_write_ignore_freq", po::value<int>(),
+        "Ignore min_write_size every N rounds of cleaning")
+    ("sm_cleaner_ignore_metadata", po::value<bool>(),
+        "Do not write metadata pages (stnode and alloc caches) in cleaner")
     ("sm_archiver_workspace_size", po::value<int>(),
         "Workspace size archiver")
     ("sm_archiver_block_size", po::value<int>()->default_value(1024*1024),
@@ -326,7 +341,7 @@ BaseScanner* LogScannerCommand::getScanner(
 
 void LogScannerCommand::setupOptions()
 {
-    setupSMOptions();
+    setupSMOptions(options);
     po::options_description logscanner("Log Scanner Options");
     logscanner.add_options()
         ("logdir,l", po::value<string>(&logdir)->required(),
@@ -345,3 +360,34 @@ void LogScannerCommand::setupOptions()
     options.add(logscanner);
 }
 
+void Command::setSMOptions(sm_options& sm_opt, const po::variables_map& values)
+{
+    BOOST_FOREACH(const po::variables_map::value_type& pair, values)
+    {
+        const std::string& key = pair.first;
+        try {
+            sm_opt.set_int_option(key, values[key].as<int>());
+        }
+        catch(boost::bad_any_cast const& e) {
+            try {
+                cerr << "Set option " << key << " to " << values[key].as<bool>() << endl;
+                sm_opt.set_bool_option(key, values[key].as<bool>());
+            }
+            catch(boost::bad_any_cast const& e) {
+                try {
+                    sm_opt.set_string_option(key, values[key].as<string>());
+                }
+                catch(boost::bad_any_cast const& e) {
+                    try {
+                        sm_opt.set_int_option(key, values[key].as<uint>());
+                    }
+                    catch(boost::bad_any_cast const& e) {
+                        cerr << "Could not process option " << key
+                            << " .. skippking." << endl;
+                        continue;
+                    }
+                }
+            }
+        }
+    };
+}

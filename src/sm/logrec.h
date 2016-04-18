@@ -113,6 +113,8 @@ struct baseLogHeader
      */
     lsn_t               _page_prv;
     /* 16+8 = 24 */
+
+    bool is_valid() const;
 };
 
 struct xidChainLogHeader
@@ -144,6 +146,7 @@ class logrec_t {
 public:
     friend rc_t xct_t::give_logbuf(logrec_t*, const fixable_page_h *, const fixable_page_h *);
     friend class sysevent;
+    friend class baseLogHeader;
 
 #include "logtype_gen.h"
     void             fill(
@@ -182,7 +185,7 @@ public:
 
     void fill(const generic_page_h& p, smsize_t length)
     {
-        w_assert3(p.store() != 0);
+        // w_assert3(p.store() != 0);
         fill(p.pid(), p.store(), p.tag(), length);
     }
 
@@ -329,6 +332,14 @@ public:
     void* operator new(size_t, void* p) { return p; }
 };
 
+inline bool baseLogHeader::is_valid() const
+{
+    return (_len >= sizeof(baseLogHeader)
+            && _type < logrec_t::t_max_logrec
+            && _cat != logrec_t::t_bad_cat
+            && _len <= sizeof(logrec_t));
+}
+
 /**
  * \brief Base struct for log records that touch multi-pages.
  * \ingroup SSMLOG
@@ -393,10 +404,8 @@ struct chkpt_bf_tab_t {
      *  Perhaps we can remove the store number from buffer control blocks
      *  (bf_tree_cb_t), provided that they are not required. (TODO)
      */
-    StoreID    store;    // +4 -> 12
-    fill4    fill;      // for purify, +4 -> 16
-    lsn_t    rec_lsn;   // +8 -> 24, this is the minimum (earliest) LSN
-    lsn_t    page_lsn;  // +8 -> 32, this is the latest (page) LSN
+    lsn_t    rec_lsn;   // +8 -> 16, this is the minimum (earliest) LSN
+    lsn_t    page_lsn;  // +8 -> 24, this is the latest (page) LSN
     };
 
     // max is set to make chkpt_bf_tab_t fit in logrec_t::data_sz
@@ -408,7 +417,6 @@ struct chkpt_bf_tab_t {
     NORET            chkpt_bf_tab_t(
     int                 cnt,
     const PageID*             p,
-    const StoreID*            s,
     const lsn_t*             l,
     const lsn_t*             pl);
 

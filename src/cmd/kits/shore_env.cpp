@@ -35,6 +35,8 @@
 #include "daemons.h"
 #include "util/random_input.h"
 
+// Get SM options spec from command class
+#include "command.h"
 
 #include <boost/algorithm/string.hpp>
 #include <boost/foreach.hpp>
@@ -775,36 +777,8 @@ int ShoreEnv::configure_sm()
 {
     TRACE( TRACE_DEBUG, "Configuring Shore...\n");
 
-    BOOST_FOREACH(const po::variables_map::value_type& pair, optionValues)
-    {
-        const std::string& key = pair.first;
-        try {
-            _popts->set_int_option(key, optionValues[key].as<int>());
-        }
-        catch(boost::bad_any_cast const& e) {
-            try {
-                cerr << "Set option " << key << " to " << optionValues[key].as<bool>() << endl;
-                _popts->set_bool_option(key, optionValues[key].as<bool>());
-            }
-            catch(boost::bad_any_cast const& e) {
-                try {
-                    _popts->set_string_option(key, optionValues[key].as<string>());
-                }
-                catch(boost::bad_any_cast const& e) {
-                    try {
-                        _popts->set_int_option(key, optionValues[key].as<uint>());
-                    }
-                    catch(boost::bad_any_cast const& e) {
-                        cerr << "Could not process option " << key
-                            << " .. skippking." << endl;
-                        continue;
-                    }
-                }
-            }
-        }
-    };
-
     upd_worker_cnt();
+    Command::setSMOptions(*_popts, optionValues);
 
     // If we reached this point the sm is configured correctly
     return (0);
@@ -846,18 +820,16 @@ int ShoreEnv::start_sm()
     assert (_pssm);
 
     if (_clobber) {
-        assert (!_device.empty());
-
         // if didn't clobber then the db is already loaded
         CRITICAL_SECTION(cs, _load_mutex);
 
         // create catalog index (must be on stid 1)
         StoreID cat_stid;
         W_COERCE(_pssm->begin_xct());
-	cout << "CatalogID=" << cat_stid << endl;
         W_COERCE(_pssm->create_index(cat_stid));
         w_assert0(cat_stid == 1);
         W_COERCE(_pssm->commit_xct());
+	cout << "CatalogID=" << cat_stid << endl;
 
         // set that the database is not loaded
         _loaded = false;
@@ -871,12 +843,10 @@ int ShoreEnv::start_sm()
         // system state. Mount here is only necessary if we explicitly dismount
         // after loading, which is not the case.
 
-
         // Make sure that catalog index (stid 1) exists
         vol_t* vol = ss_m::vol;
         w_assert0(vol);
         w_assert0(vol->is_alloc_store(1));
-        // w_assert0(strcmp(vol->devname(), _device.c_str()) == 0);
 
         // "speculate" that the database is loaded
         _loaded = true;
