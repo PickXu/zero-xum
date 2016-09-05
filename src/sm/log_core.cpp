@@ -878,7 +878,8 @@ rc_t log_core::insert(logrec_t &rec, lsn_t* rlsn)
     if(rlsn) {
         *rlsn = rec_lsn;
     }
-    DBGOUT3(<< " insert @ lsn: " << rec_lsn << " type " << rec.type() << " length " << rec.length() );
+    //cout << " insert @ lsn: " << rec_lsn << " type " << rec.type_str() << " Page ID: " << rec.pid() << endl;
+    //cout.flush();
 
     ADD_TSTAT(log_bytes_generated,size);
     return RCOK;

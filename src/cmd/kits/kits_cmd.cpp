@@ -185,6 +185,7 @@ void KitsCommand::runBenchmarkSpec()
         t.join();
 
         // run transactions for the given number of seconds
+	/* xum: comment out the clients
         createClients<Client, Environment>();
         forkClients();
 
@@ -199,6 +200,7 @@ void KitsCommand::runBenchmarkSpec()
             // sleep some more to get a gap in the log ticks
             ::sleep(5);
         }
+	*/
     }
 
     stopwatch_t timer;

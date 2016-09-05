@@ -5,6 +5,8 @@ public:
     size_t pageCount;
     size_t logrecs;
     size_t volume;
+    tid_t  tid;    
+    const char* type;
     PageID currentPage;
 
     LogPageStatsHandler() : pageCount(0), logrecs(0), volume(0),
@@ -14,14 +16,20 @@ public:
     virtual void invoke(logrec_t& r)
     {
         PageID pid = r.pid();
+ 
         if (pid != currentPage) {
             dumpCurrent();
+
+	    if(currentPage > pid)
+		pageCount = currentPage;
 
             logrecs = 0;
             volume = 0;
             currentPage = pid;
-            pageCount++;
+	    tid = r.tid();
+	    type = r.type_str();
         }
+
 
         logrecs++;
         volume += r.length();
@@ -32,7 +40,8 @@ public:
 
         cout << "pid=" << currentPage
             << " count=" << logrecs
-            << " volume=" << volume
+            << " tid=" << tid.as_int64()
+	    << " type=" << type
             << endl;
     }
 

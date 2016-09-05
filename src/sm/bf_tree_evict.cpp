@@ -34,6 +34,8 @@ w_rc_t bf_tree_m::_grab_free_block(bf_idx& ret, bool evict)
             }
         } // exit the scope to do the following out of the critical section
 
+	//cout << "Try EVICT!!!" << endl;
+
         // if the freelist was empty, let's evict some page.
         if (evict)
         {
@@ -269,6 +271,11 @@ w_rc_t bf_tree_m::evict_blocks(uint32_t& evicted_count,
         w_assert1(removed);
 
         DBG2(<< "EVICTED " << idx << " pid " << pid);
+
+	//xum
+	//stringstream stream;
+	//stream << "[EVICTED] " << pid << " " << cb._ref_count << endl;
+	//cout << stream.str();
         cb.clear_except_latch();
         // -1 indicates page was evicted (i.e., it's invalid and can be read into)
         cb._pin_cnt = -1;

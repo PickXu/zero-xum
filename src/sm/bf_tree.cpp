@@ -46,8 +46,12 @@ uint64_t bf_tree_m::_bf_swizzle_ex = 0;
 uint64_t bf_tree_m::_bf_swizzle_ex_fails = 0;
 #endif // PAUSE_SWIZZLING_ON
 
+// xum: hot page file
+ofstream hp_file ("hot_pages.dump", ios::binary);
+
 bf_tree_m::bf_tree_m(const sm_options& options)
 {
+
     // sm_bufboolsize given in MB -- default 8GB
     long bufpoolsize = options.get_int_option("sm_bufpoolsize", 8192) * 1024 * 1024;
     uint32_t  nbufpages = (bufpoolsize - 1) / smlevel_0::page_sz + 1;
@@ -166,6 +170,8 @@ bf_tree_m::bf_tree_m(const sm_options& options)
     DO_PTHREAD(pthread_mutex_init(&_eviction_lock, NULL));
 
     _cleaner_decoupled = options.get_bool_option("sm_cleaner_decoupled", false);
+
+    
 }
 
 void bf_tree_m::shutdown()
@@ -178,6 +184,8 @@ void bf_tree_m::shutdown()
 
 bf_tree_m::~bf_tree_m()
 {
+    //xum
+    hp_file.close();
     if (_control_blocks != NULL) {
 #ifdef BP_ALTERNATE_CB_LATCH
         char* buf = reinterpret_cast<char*>(_control_blocks) - sizeof(bf_tree_cb_t);
@@ -410,6 +418,11 @@ w_rc_t bf_tree_m::_fix_nonswizzled(generic_page* parent, generic_page*& page,
 
             if (cb._ref_count < BP_MAX_REFCOUNT) {
                 ++cb._ref_count;
+		// xum
+		if (cb._ref_count-1 < 800 && cb._ref_count >= 800) {
+			// New hot page
+			hp_file.write((const char*)&(shpid),sizeof(int));
+		}
             }
             if (mode == LATCH_EX && cb._ref_count_ex) {
                 ++cb._ref_count_ex;
@@ -441,6 +454,10 @@ w_rc_t bf_tree_m::_fix_nonswizzled(generic_page* parent, generic_page*& page,
             w_assert1(cb._pin_cnt > 0);
             DBG(<< "Fix set pin cnt of " << idx << " to " << cb._pin_cnt);
             w_assert1(cb._pin_cnt > 0);
+
+	    //stringstream stream;
+	    //stream << "Page " << shpid << ": " << cb._ref_count << endl;
+	    //cout << stream.str();
             return RCOK;
         }
     }
@@ -956,6 +973,11 @@ w_rc_t bf_tree_m::refix_direct (generic_page*& page, bf_idx
     cb.pin();
     DBG(<< "Refix direct of " << idx << " set pin cnt to " << cb._pin_cnt);
     ++cb._ref_count;
+    //xum
+    if (cb._ref_count -1 < 800 && cb._ref_count >= 800) {
+	// New hot page
+	hp_file.write((const char*)&(page->pid),sizeof(int));
+    }
     if (mode == LATCH_EX) { ++cb._ref_count_ex; }
     page = &(_buffer[idx]);
     return RCOK;
@@ -1173,13 +1195,34 @@ void WarmupThread::fixChildren(btree_page_h& parent, size_t& fixed, size_t max)
     }
 }
 
+// xum
+void WarmupThread::fixHot(int length, size_t& fixed,char* buffer)
+{
+    btree_page_h page;
+    for(int i=0;i<length;i+=4) {
+	int* pid = (int*)(buffer+i);
+	page.fix_direct(*pid,LATCH_SH);
+	fixed++;
+    }
+}
+
 void WarmupThread::run()
 {
+    cout << "[XUM] Begin warmup by preloading hot pages ..." << endl;
     size_t npages = smlevel_0::bf->get_size();
     vol_t* vol = smlevel_0::vol;
     stnode_cache_t* stcache = vol->get_stnode_cache();
     vector<StoreID> stids;
     stcache->get_used_stores(stids);
+
+    //xum: preload hot pages
+    ifstream inf("hot_pages.dump",ios::binary|ios::in);
+    inf.seekg (0, inf.end);
+    int length = inf.tellg();
+    inf.seekg (0, inf.beg);
+
+    char * buffer = new char [length];
+    inf.read(buffer,length);
 
     // Load all pages in depth-first until buffer is full or all pages read
     btree_page_h parent;
@@ -1188,8 +1231,10 @@ void WarmupThread::run()
     for (size_t i = 0; i < stids.size(); i++) {
         parent.fix_root(stids[i], LATCH_SH);
         fixed++;
-        fixChildren(parent, fixed, npages);
+        //fixChildren(parent, fixed, npages);
+	fixHot(length,fixed,buffer);
     }
+    delete [] buffer;  	
 
     ERROUT(<< "Finished warmup! Pages fixed: " << fixed << " of " << npages <<
             " with DB size " << vol->get_alloc_cache()->get_last_allocated_pid());

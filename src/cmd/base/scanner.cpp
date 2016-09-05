@@ -119,7 +119,7 @@ void BlockScanner::run()
         fend = in.tellg();
         fpos = 0;
 
-        cerr << "Scanning log file " << fname << endl;
+        //cerr << "Scanning log file " << fname << endl;
 
         while (fpos < fend) {
             //cerr << "Reading block at " << fpos << " from " << fname.str();

@@ -94,7 +94,7 @@ public:
 	virtual void run()
 	{
 		zmq::context_t context (1);
-                zmq::socket_t socket (context, ZMQ_SUB);
+                zmq::socket_t socket (context, ZMQ_REP);
 	        socket.bind ("tcp://*:6667");
 		
 		while (active) {

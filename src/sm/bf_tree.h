@@ -656,6 +656,9 @@ public:
 
     virtual void run();
     void fixChildren(btree_page_h& parent, size_t& fixed, size_t max);
+
+    //xum
+    void fixHot(int length, size_t& fixed, char* buffer);
 };
 
 // tiny macro to help swizzled-LRU and freelist access
