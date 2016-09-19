@@ -48,6 +48,7 @@ uint64_t bf_tree_m::_bf_swizzle_ex_fails = 0;
 
 // xum: hot page file
 ofstream hp_file;
+int threshold;
 
 bf_tree_m::bf_tree_m(const sm_options& options)
 {
@@ -173,6 +174,7 @@ bf_tree_m::bf_tree_m(const sm_options& options)
 
     //xum: hot page file
     bool preload = options.get_bool_option("sm_bufferpool_preload", false);
+    threshold = options.get_int_option("sm_bufferpool_preload_threshold",800);
     if (preload)
 	hp_file.open("hot_pages.dump", std::ofstream::out | std::ofstream::binary);
 }
@@ -423,7 +425,7 @@ w_rc_t bf_tree_m::_fix_nonswizzled(generic_page* parent, generic_page*& page,
             if (cb._ref_count < BP_MAX_REFCOUNT) {
                 ++cb._ref_count;
 		// xum
-		if (cb._ref_count-1 < 800 && cb._ref_count >= 800) {
+		if (cb._ref_count-1 < threshold && cb._ref_count >= threshold) {
 			// New hot page
 			if (hp_file.is_open()) {
 				hp_file.write((const char*)&(shpid),sizeof(int));
@@ -983,7 +985,7 @@ w_rc_t bf_tree_m::refix_direct (generic_page*& page, bf_idx
     if (mode == LATCH_EX) { ++cb._ref_count_ex; }
     page = &(_buffer[idx]);
     //xum
-    if (cb._ref_count -1 < 800 && cb._ref_count >= 800) {
+    if (cb._ref_count -1 < threshold && cb._ref_count >= threshold) {
 	// New hot page
 	if (hp_file.is_open()) {
 		hp_file.write((const char*)&(page->pid),sizeof(int));
