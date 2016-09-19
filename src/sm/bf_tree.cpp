@@ -47,7 +47,7 @@ uint64_t bf_tree_m::_bf_swizzle_ex_fails = 0;
 #endif // PAUSE_SWIZZLING_ON
 
 // xum: hot page file
-ofstream hp_file ("hot_pages.dump", ios::binary);
+ofstream hp_file;
 
 bf_tree_m::bf_tree_m(const sm_options& options)
 {
@@ -171,7 +171,10 @@ bf_tree_m::bf_tree_m(const sm_options& options)
 
     _cleaner_decoupled = options.get_bool_option("sm_cleaner_decoupled", false);
 
-    
+    //xum: hot page file
+    bool preload = options.get_bool_option("sm_bufferpool_preload", false);
+    if (preload)
+	hp_file.open("hot_pages.dump", std::ofstream::out | std::ofstream::binary);
 }
 
 void bf_tree_m::shutdown()
@@ -185,7 +188,8 @@ void bf_tree_m::shutdown()
 bf_tree_m::~bf_tree_m()
 {
     //xum
-    hp_file.close();
+    if (hp_file.is_open())
+    	hp_file.close();
     if (_control_blocks != NULL) {
 #ifdef BP_ALTERNATE_CB_LATCH
         char* buf = reinterpret_cast<char*>(_control_blocks) - sizeof(bf_tree_cb_t);
@@ -421,7 +425,10 @@ w_rc_t bf_tree_m::_fix_nonswizzled(generic_page* parent, generic_page*& page,
 		// xum
 		if (cb._ref_count-1 < 800 && cb._ref_count >= 800) {
 			// New hot page
-			hp_file.write((const char*)&(shpid),sizeof(int));
+			if (hp_file.is_open()) {
+				hp_file.write((const char*)&(shpid),sizeof(int));
+				hp_file.flush();
+			}
 		}
             }
             if (mode == LATCH_EX && cb._ref_count_ex) {
@@ -973,13 +980,17 @@ w_rc_t bf_tree_m::refix_direct (generic_page*& page, bf_idx
     cb.pin();
     DBG(<< "Refix direct of " << idx << " set pin cnt to " << cb._pin_cnt);
     ++cb._ref_count;
+    if (mode == LATCH_EX) { ++cb._ref_count_ex; }
+    page = &(_buffer[idx]);
     //xum
     if (cb._ref_count -1 < 800 && cb._ref_count >= 800) {
 	// New hot page
-	hp_file.write((const char*)&(page->pid),sizeof(int));
+	if (hp_file.is_open()) {
+		hp_file.write((const char*)&(page->pid),sizeof(int));
+		hp_file.flush();
+	}
     }
-    if (mode == LATCH_EX) { ++cb._ref_count_ex; }
-    page = &(_buffer[idx]);
+
     return RCOK;
 }
 
