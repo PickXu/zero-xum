@@ -22,7 +22,8 @@ On an Ubuntu system, the dependencies can usually be installed with the followin
 
 ```
 sudo apt-get install git cmake build-essential
-sudo apt-get install liboost-dev libboost-thread-dev libboost-program-options-dev libboost-random-dev
+sudo apt-get install libboost-dev libboost-filesystem-dev libboost-regex-dev libboost-thread-dev libboost-program-options-dev libboost-random-dev
+sudo apt-get install libnuma-dev libzmq-dev libprotobuf-dev protobuf-compiler
 ```
 
 Zero requires libboost version 1.48. Please make sure that this version or a higher one is installed.
@@ -34,7 +35,7 @@ CMake supports out-of-source builds, which means that binaries are generated in 
 The typical approach is to create a `build` folder inside the project root after cloning it with git:
 
 ```
-git clone https://github.com/caetanosauer/zero
+git clone https://github.com/PickXu/zero-xum.git
 cd zero
 mkdir build
 ```
