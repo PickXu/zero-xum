@@ -12,8 +12,10 @@
 #include "logpagestats.h"
 #include "dbinspect.h"
 #include "loganalysis.h"
-#include "experiments/restore_cmd.h"
 #include "dbscan.h"
+#include "addbackup.h"
+#include "xctlatency.h"
+#include "tracerestore.h"
 
 #include <boost/foreach.hpp>
 
@@ -45,14 +47,16 @@ void Command::init()
     REGISTER_COMMAND("verifylog", VerifyLog);
     REGISTER_COMMAND("truncatelog", TruncateLog);
     REGISTER_COMMAND("dbscan", DBScan);
+    REGISTER_COMMAND("addbackup", AddBackup);
+    REGISTER_COMMAND("xctlatency", XctLatency);
     REGISTER_COMMAND("agglog", AggLog);
     REGISTER_COMMAND("logstats", LogStats);
     REGISTER_COMMAND("logpagestats", LogPageStats);
     REGISTER_COMMAND("dbinspect", DBInspect);
     REGISTER_COMMAND("loganalysis", LogAnalysis);
     REGISTER_COMMAND("kits", KitsCommand);
-    REGISTER_COMMAND("restore", RestoreCmd);
     REGISTER_COMMAND("propstats", PropStats);
+    REGISTER_COMMAND("tracerestore", RestoreTrace);
 }
 
 void Command::setupCommonOptions()
@@ -152,6 +156,9 @@ void Command::setupSMOptions(po::options_description& options)
     ("sm_truncate_log", po::value<bool>()->default_value(false)
         ->implicit_value(true),
         "Whether to truncate log partitions at SM shutdown")
+    ("sm_truncate_archive", po::value<bool>()->default_value(false)
+        ->implicit_value(true),
+        "Whether to truncate log archive runs at SM shutdown")
     ("sm_log_partition_size", po::value<int>()->default_value(1024),
         "Size of a log partition in MB")
     ("sm_log_max_partitions", po::value<int>()->default_value(0),
@@ -197,12 +204,6 @@ void Command::setupSMOptions(po::options_description& options)
         "Enable instant restart")
     ("sm_restart_log_based_redo", po::value<bool>(),
         "Perform non-instant restart with log-based redo instead of page-based")
-    ("sm_restore_segsize", po::value<int>(),
-        "Segment size restore")
-    ("sm_restore_prefetcher_window", po::value<int>(),
-        "Segment size restore")
-    ("sm_backup_prefetcher_segments", po::value<int>(),
-        "Segment size restore")
     ("sm_rawlock_gc_interval_ms", po::value<int>(),
         "Garbage Collection Interval in ms")
     ("sm_rawlock_lockpool_segsize", po::value<int>(),
@@ -241,10 +242,13 @@ void Command::setupSMOptions(po::options_description& options)
         "Ignore min_write_size every N rounds of cleaning")
     ("sm_cleaner_ignore_metadata", po::value<bool>(),
         "Do not write metadata pages (stnode and alloc caches) in cleaner")
+    ("sm_cleaner_async_candidate_collection", po::value<bool>(),
+        "Collect candidate frames to be cleaned in an asynchronous thread")
     ("sm_archiver_workspace_size", po::value<int>(),
         "Workspace size archiver")
-    ("sm_archiver_block_size", po::value<int>()->default_value(1024*1024),
-        "Archiver Block size")
+    // CS TODO: archiver currently only works with 1MB blocks
+    // ("sm_archiver_block_size", po::value<int>()->default_value(1024*1024),
+    //     "Archiver Block size")
     ("sm_archiver_bucket_size", po::value<int>()->default_value(128),
         "Archiver bucket size")
     ("sm_merge_factor", po::value<int>(),
@@ -271,6 +275,12 @@ void Command::setupSMOptions(po::options_description& options)
         "Ticker interval in millisec")
     ("sm_prefetch", po::value<bool>(),
         "Enable/Disable prefetching")
+    ("sm_backup_prefetcher_segments", po::value<int>(),
+        "Segment size restore")
+    ("sm_restore_segsize", po::value<int>(),
+        "Segment size restore")
+    ("sm_restore_prefetcher_window", po::value<int>(),
+        "Segment size restore")
     ("sm_restore_instant", po::value<bool>(),
         "Enable/Disable instant restore")
     ("sm_restore_reuse_buffer", po::value<bool>(),
@@ -283,6 +293,14 @@ void Command::setupSMOptions(po::options_description& options)
         "Attempt to read at most this many bytes when scanning log archive")
     ("sm_restore_preemptive", po::value<bool>(),
         "Use preemptive scheduling during restore")
+    ("sm_restore_sched_singlepass", po::value<bool>(),
+        "Use single-pass scheduling in restore")
+    ("sm_restore_threads", po::value<int>(),
+        "Number of restore threads to use")
+    ("sm_restore_sched_ondemand", po::value<bool>(),
+        "Support on-demand restore")
+    ("sm_restore_sched_random", po::value<bool>(),
+        "Use random page order in restore scheduler")
     ("sm_bufferpool_swizzle", po::value<bool>(),
         "Enable/Disable bufferpool swizzle")
     ("sm_archiver_eager", po::value<bool>(),
@@ -301,7 +319,7 @@ void Command::setupSMOptions(po::options_description& options)
         "Path to a backup directory")
     ("sm_bufferpool_replacement_policy", po::value<string>(),
         "Replacement Policy")
-    ("sm_archdir", po::value<string>(),
+    ("sm_archdir", po::value<string>()->default_value("archive"),
         "Path to archive directory");
     options.add(smoptions);
 }

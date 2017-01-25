@@ -101,9 +101,12 @@ public:
 
     string make_log_name(partition_number_t pnum) const;
     fs::path make_log_path(partition_number_t pnum) const;
+    fs::path make_chkpt_path(lsn_t lsn) const;
 
-    void wakeup_recycler();
-    unsigned delete_old_partitions(partition_number_t older_than = 0);
+    void add_checkpoint(lsn_t lsn);
+
+    void wakeup_recycler(bool chkpt_only = false);
+    unsigned delete_old_partitions(bool chkpt_only = false, partition_number_t older_than = 0);
 
 private:
     shared_ptr<partition_t> create_partition(partition_number_t pnum);
@@ -113,6 +116,8 @@ private:
 
     partition_map_t _partitions;
     shared_ptr<partition_t> _curr_partition;
+
+    vector<lsn_t> _checkpoints;
 
     skip_log* _skip_log;
 
@@ -134,6 +139,8 @@ public:
     enum { BLOCK_SIZE = partition_t::XFERSIZE };
     static const string log_prefix;
     static const string log_regex;
+    static const string chkpt_prefix;
+    static const string chkpt_regex;
 };
 
 #endif

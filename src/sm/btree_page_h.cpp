@@ -21,28 +21,28 @@
 
 PageID btree_page_h::pid0() const
 {
-    PageID shpid = page()->btree_pid0;
-    if (shpid) {
-        return smlevel_0::bf->normalize_shpid(shpid);
+    PageID pid = page()->btree_pid0;
+    if (pid) {
+        return smlevel_0::bf->normalize_pid(pid);
     }
-    return shpid;
+    return pid;
 }
 
 PageID btree_page_h::get_foster() const {
-    PageID shpid = page()->btree_foster;
-    if (shpid) {
-        return smlevel_0::bf->normalize_shpid(shpid);
+    PageID pid = page()->btree_foster;
+    if (pid) {
+        return smlevel_0::bf->normalize_pid(pid);
     }
-    return shpid;
+    return pid;
 }
 
 PageID btree_page_h::child(slotid_t slot) const
 {
-    PageID shpid = child_opaqueptr(slot);
-    if (shpid) {
-        return smlevel_0::bf->normalize_shpid(shpid);
+    PageID pid = child_opaqueptr(slot);
+    if (pid) {
+        return smlevel_0::bf->normalize_pid(pid);
     }
-    return shpid;
+    return pid;
 }
 
 btrec_t&
@@ -177,8 +177,8 @@ rc_t btree_page_h::format_steal(lsn_t            new_lsn,         // LSN of the 
         // For non-leaf page only
         w_assert1(steal_src2);
         w_assert1(is_node());
-        w_assert1(steal_src2->pid0() != pid0);
-        w_assert1(steal_src2->pid0() != 0);
+        w_assert1(steal_src2->pid0_opaqueptr() != pid0);
+        w_assert1(steal_src2->pid0_opaqueptr() != 0);
 
         // before stealing regular records from src2, steal it's pid0:
         cvec_t       stolen_key(steal_src2->get_fence_low_key() + page()->btree_prefix_length,
@@ -281,7 +281,7 @@ rc_t btree_page_h::format_foster_child(btree_page_h& parent,
     page()->btree_pid0 = new_pid0;
     page()->btree_pid0_emlsn = new_pid0_emlsn;
     page()->btree_level = parent.level();
-    page()->btree_foster = parent.get_foster();
+    page()->btree_foster = parent.get_foster_opaqueptr();
     page()->btree_foster_emlsn = parent.get_foster_emlsn();
     page()->init_items();
 
@@ -307,6 +307,8 @@ rc_t btree_page_h::format_foster_child(btree_page_h& parent,
 
     // Move records from parent
     for (int i = mid_slot; i < parent.nrecs(); ++i) {
+        // CS: if this is a branch node, first pointer is already on pid0
+        if (parent.is_node() && i == mid_slot) { continue; }
         // get full uncompressed key from src slot #i into key:
         cvec_t key(parent.get_prefix_key(), parent.get_prefix_length());
         size_t      trunc_key_length;
@@ -1331,13 +1333,16 @@ bool btree_page_h::_is_enough_spacious_ghost(const w_keystr_t &key, slotid_t slo
 }
 
 rc_t btree_page_h::replace_ghost(const w_keystr_t &key,
-                                 const cvec_t &elem) {
+                                 const cvec_t &elem, bool redo)
+{
     w_assert2( is_fixed());
     w_assert2( is_leaf());
 
     // log FIRST. note that this might apply the deferred ghost creation too.
     // so, this cannot be done later than any of following
-    W_DO (log_btree_insert (*this, key, elem, false /*is_sys_txn*/));
+    if (!redo) {
+        W_DO (log_btree_insert (*this, key, elem, false /*is_sys_txn*/));
+    }
 
     // which slot to replace?
     bool found;
@@ -1459,6 +1464,10 @@ void btree_page_h::insert_nonghost(const w_keystr_t &key, const cvec_t &elem) {
         w_assert3 (rec.key().compare(key) == 0);
 #endif // W_DEBUG_LEVEL > 2
 
+        // CS TODO: slot 0 is never used, because when the page is empty, slot
+        // == 0, which mins replace_item_data will be invoked on slot 1. This
+        // means that all methods that iterate over slots (e.g.,
+        // _convrt_to_disk_page) must skip slot 0 (what a great design ...)
         if (!page()->replace_item_data(slot+1, _element_offset(slot), elem)) {
             w_assert1(false); // should not happen because ghost should have had enough space
         }
@@ -1542,7 +1551,7 @@ bool btree_page_h::check_chance_for_norecord_split(const w_keystr_t& key_to_inse
     } else {
         space_for_split += get_chain_fence_high_length(); // otherwise chain-fence-high is unchanged
     }
-    return (usable_space() >= align(space_for_split)); // otherwise it's too late
+    return (usable_space() >= ALIGN_BYTE(space_for_split)); // otherwise it's too late
 }
 
 void btree_page_h::suggest_fence_for_split(w_keystr_t &mid,
@@ -1739,7 +1748,7 @@ btree_page_h::print(bool print_elem) {
     const int L = 3;
 
     for (i = 0; i < L - level(); i++)  cout << '\t';
-    cout << pid0() << "=" << pid0() << endl;
+    cout << "PID0 = " << pid0_opaqueptr() << endl;
 
     for (i = 0; i < nrecs(); i++)  {
         for (int j = 0; j < L - level(); j++)  cout << '\t' ;
@@ -1753,7 +1762,7 @@ btree_page_h::print(bool print_elem) {
                 cout << ", elen="  << r.elen() << " bytes: " << r.elem();
             }
         } else {
-            cout << "pid = " << r.child() << ", emlsn=" << r.child_emlsn();
+            cout << ", pid = " << r.child() << ", emlsn=" << r.child_emlsn();
         }
         cout << ">" << endl;
     }

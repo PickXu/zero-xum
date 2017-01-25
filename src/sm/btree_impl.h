@@ -129,14 +129,14 @@ public:
     static rc_t                        _ux_update(
         StoreID store,
         const w_keystr_t&                 key,
-        const cvec_t&                     elem,
-        const bool                        undo);
+        const cvec_t&                     elem);
+
     /** _ux_update()'s internal function without retry by itself.*/
     static rc_t                        _ux_update_core(
         StoreID store,
         const w_keystr_t&                 key,
-        const cvec_t&                     elem,
-        const bool                        undo);
+        const cvec_t&                     elem);
+
     /** Last half of _ux_update, after traversing, finding (or not) and ghost determination.*/
     static rc_t _ux_update_core_tail(
      StoreID store,
@@ -179,14 +179,12 @@ public:
     static rc_t                        _ux_overwrite(
         StoreID store,
         const w_keystr_t&                 key,
-        const char *el, smsize_t offset, smsize_t elen,
-        const bool undo);
+        const char *el, smsize_t offset, smsize_t elen);
     /** _ux_overwrite()'s internal function without retry by itself.*/
     static rc_t                        _ux_overwrite_core(
         StoreID store,
         const w_keystr_t&                 key,
-        const char *el, smsize_t offset, smsize_t elen,
-        const bool undo);
+        const char *el, smsize_t offset, smsize_t elen);
 
     /**
      * \brief Creates a ghost record for the key as a preparation for insert.
@@ -211,11 +209,10 @@ public:
     */
     static rc_t                        _ux_remove(
         StoreID store,
-        const w_keystr_t&   key,
-        const bool          undo);
+        const w_keystr_t&   key);
 
     /** _ux_remove()'s internal function without retry by itself.*/
-    static rc_t _ux_remove_core(StoreID store, const w_keystr_t &key, const bool undo);
+    static rc_t _ux_remove_core(StoreID store, const w_keystr_t &key);
 
     /**
     *  \brief Reverses the ghost record of specified key to regular state.
@@ -290,7 +287,6 @@ public:
     * @param[in] leaf_latch_mode EX for insert/remove, SH for lookup
     * @param[out] leaf leaf satisfying search
     * @param[in] allow_retry only when leaf_latch_mode=EX. whether to retry from root if latch upgrade fails
-    * @param[in] from_undo is true if caller is from an UNDO operation
     */
     static rc_t                 _ux_traverse(
         StoreID store,
@@ -298,8 +294,7 @@ public:
         traverse_mode_t            traverse_mode,
         latch_mode_t               leaf_latch_mode,
         btree_page_h&                   leaf,
-        bool                       allow_retry = true,
-        const bool                 from_undo = false
+        bool                       allow_retry = true
         );
 
     /**
@@ -323,8 +318,7 @@ public:
         traverse_mode_t            traverse_mode,
         latch_mode_t               leaf_latch_mode,
         btree_page_h&              leaf,
-        PageID&                   leaf_pid_causing_failed_upgrade,
-        const bool                 from_undo
+        PageID&                   leaf_pid_causing_failed_upgrade
         );
 
     /**
@@ -352,7 +346,7 @@ public:
      * and, false positive is fine. it's just one mutex call overhead.
      * See jira ticket:78 "Eager-Opportunistic Hybrid Latching" (originally trac ticket:80).
      */
-    static rc_t _ux_traverse_try_eager_adopt(btree_page_h &current, PageID next_pid, const bool from_recovery);
+    static rc_t _ux_traverse_try_eager_adopt(btree_page_h &current, PageID next_pid);
 
     /**
      * If next has foster pointer and real-parent wants to adopt it, call this function.
@@ -362,7 +356,7 @@ public:
      * will be called to do it.
      * See jira ticket:78 "Eager-Opportunistic Hybrid Latching" (originally trac ticket:80).
      */
-    static rc_t _ux_traverse_try_opportunistic_adopt(btree_page_h &current, btree_page_h &next, const bool from_recovery);
+    static rc_t _ux_traverse_try_opportunistic_adopt(btree_page_h &current, btree_page_h &next);
 
     /**
     *  Find key in btree. If found, copy up to elen bytes of the
@@ -464,7 +458,7 @@ public:
      * @param[out] pushedup whether the adopt was done
      */
     static rc_t _sx_opportunistic_adopt_foster(btree_page_h &parent, btree_page_h &child,
-                                                    bool &pushedup, const bool from_recovery);
+                                                    bool &pushedup);
 
     /**
      * \brief Pushes up all foster-children of children to the parent.
@@ -481,8 +475,7 @@ public:
      * is that this function doesn't exactly check children have foster-child.
      * So, this is much faster but some foster-child might be not adopted!
      */
-    static rc_t _sx_adopt_foster_sweep_approximate (btree_page_h &parent, PageID surely_need_child_pid,
-                                                            const bool from_recovery);
+    static rc_t _sx_adopt_foster_sweep_approximate (btree_page_h &parent, PageID surely_need_child_pid);
 
     /** Applies the changes of one adoption on parent node. Used by both usual adoption and REDO. */
     static void _ux_adopt_foster_apply_parent (btree_page_h &parent_arg,
@@ -493,24 +486,6 @@ public:
     /**
      * \brief Splits a page, making the new page as foster-child.
      *  \details
-     * The new page is pointed by the old page in the "foster" property.
-     * This function does not adopt the new separator key to parent,
-     * making the by-effect minimal.
-     *
-     * If the given page already has a foster child, the new page
-     * jumps between them. For example, [old page] -> [page a].
-     * will be [old page] -> [new page] -> [page a].
-     *
-     * Context: only in system transaction.
-     * @param[in] page the page to split. also called "old" page.
-     * @param[out] new_page_id ID of the newly created page.
-     * @param[in] triggering_key the key to be inserted after this split.
-     * used to determine split policy.
-     */
-    static rc_t                 _sx_split_foster(btree_page_h &page, PageID &new_page_id,
-        const w_keystr_t &triggering_key);
-
-    /**
      * Alternative version which uses full logging and is independent of the
      * buffer pool, i.e., it does not require fixing pages. This version should
      * work for single page recovery, instant restart, as well as instant
@@ -530,8 +505,14 @@ public:
      * but this could also be implemented as a third log record.
      *
      * \author Caetano Sauer
+     *
+     * Context: only in system transaction.
+     * @param[in] page the page to split. also called "old" page.
+     * @param[out] new_page_id ID of the newly created page.
+     * @param[in] triggering_key the key to be inserted after this split.
+     * used to determine split policy.
      */
-    static rc_t                 _sx_split_foster_new(btree_page_h &page,
+    static rc_t                 _sx_split_foster(btree_page_h &page,
             PageID &new_page_id, const w_keystr_t &triggering_key);
 
     /**
