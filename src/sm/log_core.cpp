@@ -63,9 +63,11 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 
 #include "sm_options.h"
 #include "sm_base.h"
+#include "logdef_gen.cpp"
 #include "logtype_gen.h"
 #include "logdef_gen.cpp"
 #include "logrec.h"
+//#include "log.h"
 #include "log_core.h"
 #include "log_carray.h"
 #include "log_lsn_tracker.h"
@@ -84,6 +86,8 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 #include <boost/crc.hpp>
 
 typedef smlevel_0::fileoff_t fileoff_t;
+
+
 
 class ticker_thread_t : public smthread_t
 {
@@ -349,6 +353,8 @@ log_core::log_core(const sm_options& options)
       _shutting_down(false),
       _flush_daemon_running(false)
 {
+    
+
     _segsize = SEGMENT_SIZE;
 
     DO_PTHREAD(pthread_mutex_init(&_wait_flush_lock, NULL));
@@ -1156,6 +1162,7 @@ lsn_t log_core::flush_daemon_work(lsn_t old_mark)
     W_COERCE(p->flush(start_lsn, _buf, start1, end1, start2, end2));
 
     long written = (end2 - start2) + (end1 - start1);
+    //cout << "Flushed " << written << " bytes" << endl;
     p->set_size(start_lsn.lo()+written);
     ::usleep(1000);
 
@@ -1248,6 +1255,7 @@ lsn_t log_core::flush_daemon_work(lsn_t old_mark)
 
     }
 #endif
+
 
     _durable_lsn = end_lsn;
     _start = new_start;

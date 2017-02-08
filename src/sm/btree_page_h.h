@@ -633,7 +633,7 @@ public:
      * @param[in] key inserted key
      * @param[in] elem record data
      */
-    rc_t            replace_ghost(const w_keystr_t &key, const cvec_t &elem);
+    rc_t            replace_ghost(const w_keystr_t &key, const cvec_t &elem, bool redo = false);
 
     /**
      * \brief Replaces the special fence record with the given new data,
@@ -1293,6 +1293,7 @@ inline PageID* btree_page_h::page_pointer_address(int offset) {
         return &page()->btree_pid0;
     }
 
+    // CS TODO: why +1 here? what happens when offset == 0?
     return &page()->item_child(offset+1);
 }
 

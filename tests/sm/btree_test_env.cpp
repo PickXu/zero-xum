@@ -187,8 +187,10 @@ testdriver_thread_t::do_construct()
     }
 
     if(_options.get_bool_option("sm_testenv_init_vol", true)) {
-        _options.set_bool_option("sm_truncate", true);
+        _options.set_bool_option("sm_format", true);
     }
+    _options.set_bool_option("sm_shutdown_clean", false);
+    _options.set_int_option("sm_cleaner_interval_msec", 0);
 }
 
 rc_t
@@ -238,7 +240,9 @@ void testdriver_thread_t::run()
 
         // end of ssm scope
         // Clean up and shut down
-        vout << "\nShutting down SSM " << (_functor->_clean_shutdown ? "cleanly" : "simulating a crash") << "..." << endl;
+        vout << "\nShutting down SSM "
+            << (_functor->_clean_shutdown ? "cleanly" : "simulating a crash")
+            << "..." << endl;
         _env->_ssm = NULL;
     }
     vout << "Finished!" << endl;

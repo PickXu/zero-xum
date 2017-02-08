@@ -189,6 +189,7 @@ w_rc_t    sdisk_unix_t::open(const char *name, int flags, int mode)
         return RC(stBADFD);    /* XXX in use */
 
     _fd = ::os_open(name, convert_flags(flags), mode);
+    cout << name << endl;
     CHECK_ERRNO(_fd);
 
     return RCOK;

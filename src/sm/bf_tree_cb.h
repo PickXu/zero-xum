@@ -9,6 +9,7 @@
 #include "latch.h"
 #include "bf_tree.h"
 #include <string.h>
+#include <atomic>
 
 #include <assert.h>
 
@@ -51,6 +52,30 @@
  *
  */
 struct bf_tree_cb_t {
+    /**
+     * Maximum value of the per-frame refcount (reference counter).  We cap the
+     * refcount to avoid contention on the cacheline of the frame's control
+     * block (due to ping-pongs between sockets) when multiple sockets
+     * read-access the same frame.  The refcount max value should have enough
+     * granularity to separate cold from hot pages.
+     *
+     * CS TODO: but doesnt the latch itself already incur such cacheline
+     * bouncing?  If so, then we could simply move the refcount inside latch_t
+     * (which must have the same size as a cacheline) and be done with it. No
+     * additional overhead on cache coherence other than the latching itself is
+     * expected. We could reuse the field _total_count in latch_t, or even
+     * split it into to 16-bit integers: one for shared and one for exclusive
+     * latches. This field is currently only used for tests, but it doesn't
+     * make sense to count CB references and latch acquisitions in separate
+     * variables.
+     */
+    static const uint16_t BP_MAX_REFCOUNT = 1024;
+
+    /**
+     * Initial value of the per-frame refcount (reference counter).
+     */
+    static const uint16_t BP_INITIAL_REFCOUNT = 0;
+
     /** clears all properties. */
     inline void clear () {
         clear_latch();
@@ -59,13 +84,23 @@ struct bf_tree_cb_t {
 
     /** clears all properties but latch. */
     inline void clear_except_latch () {
-#ifdef BP_ALTERNATE_CB_LATCH
         signed char latch_offset = _latch_offset;
         ::memset(this, 0, sizeof(bf_tree_cb_t));
         _latch_offset = latch_offset;
-#else
-        ::memset(this, 0, sizeof(bf_tree_cb_t)-sizeof(latch_t));
-#endif
+    }
+
+    /** Initializes all fields -- called by fix when fetching a new page */
+    void init(PageID pid, lsn_t page_lsn)
+    {
+        clear_except_latch();
+        _pin_cnt = 0;
+        _pid = pid;
+        _used = true;
+        _swizzled = false;
+        _ref_count = BP_INITIAL_REFCOUNT;
+        _ref_count_ex = BP_INITIAL_REFCOUNT;
+        _clean_lsn = page_lsn;
+        _page_lsn = page_lsn;
     }
 
     /** clears latch */
@@ -97,14 +132,13 @@ struct bf_tree_cb_t {
     /// Reference count incremented only by X-latching
     uint16_t _ref_count_ex; // +2 -> 12
 
-    /// true if this block is actually used
-    bool _used;          // +1  -> 13
-    /// Whether this page is swizzled from the parent
-    bool _swizzled;      // +1 -> 14
-    /// Whether this page is concurrently being swizzled by another thread
-    bool _concurrent_swizzling;      // +1 -> 15
     /// Filler
-    uint8_t _fill16;        // +1 -> 16
+    uint16_t _fill14;        // +2 -> 14
+
+    /// true if this block is actually used
+    std::atomic<bool> _used;          // +1  -> 15
+    /// Whether this page is swizzled from the parent
+    std::atomic<bool> _swizzled;      // +1 -> 16
 
     // CS TODO: testing approach of maintaining page LSN in CB
     lsn_t _page_lsn; // +8 -> 24
@@ -129,13 +163,21 @@ struct bf_tree_cb_t {
     // Add padding to align control block at cacheline boundary (64 bytes)
     uint8_t _fill63[29];    // +29 -> 63
 
-#ifdef BP_ALTERNATE_CB_LATCH
+    /* The bufferpool should alternate location of latches and control blocks
+     * starting at an odd multiple of 64B as follows:
+     *                  ...|CB0|L0|L1|CB1|CB2|L2|L3|CB3|...
+     * This layout addresses a pathology that we attribute to the hardware
+     * spatial prefetcher. The default layout allocates a latch right after a
+     * control block so that the control block and latch live in adjacent cache
+     * lines (in the same 128B sector). The pathology happens because when we
+     * write-access the latch, the processor prefetches the control block in
+     * read-exclusive mode even if we late really only read-access the control
+     * block. This causes unnecessary coherence traffic. With the new layout, we
+     * avoid having a control block and latch in the same 128B sector.
+     */
+
     /** offset to the latch to protect this page. */
     int8_t                      _latch_offset;  // +1 -> 64
-#else
-    fill8                       _fill64;      // +1 -> 64
-    latch_t                     _latch;         // +64 ->128
-#endif
 
     // increment pin count atomically
     void pin()
@@ -149,18 +191,28 @@ struct bf_tree_cb_t {
         lintel::unsafe::atomic_fetch_sub(&_pin_cnt, 1);
     }
 
+    void inc_ref_count()
+    {
+        if (_ref_count < BP_MAX_REFCOUNT) {
+            ++_ref_count;
+        }
+    }
+
+    void inc_ref_count_ex()
+    {
+        if (_ref_count < BP_MAX_REFCOUNT) {
+            ++_ref_count_ex;
+        }
+    }
+
     // disabled (no implementation)
     bf_tree_cb_t();
     bf_tree_cb_t(const bf_tree_cb_t&);
     bf_tree_cb_t& operator=(const bf_tree_cb_t&);
 
     latch_t* latchp() const {
-#ifdef BP_ALTERNATE_CB_LATCH
         uintptr_t p = reinterpret_cast<uintptr_t>(this) + _latch_offset;
         return reinterpret_cast<latch_t*>(p);
-#else
-        return const_cast<latch_t*>(&_latch);
-#endif
     }
 
     latch_t &latch() {

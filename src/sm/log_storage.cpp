@@ -33,13 +33,15 @@
 typedef smlevel_0::fileoff_t fileoff_t;
 const string log_storage::log_prefix = "log.";
 const string log_storage::log_regex = "log\\.[1-9][0-9]*";
+const string log_storage::chkpt_prefix = "chkpt_";
+const string log_storage::chkpt_regex = "chkpt_[1-9][0-9]*\\.[0-9][0-9]*";
 
 class partition_recycler_t : public smthread_t
 {
 public:
-    partition_recycler_t(log_storage* storage)
+    partition_recycler_t(log_storage* storage, bool chkpt_only = false)
         : smthread_t(t_regular, "partition_recycler"), storage(storage),
-        retire(false)
+        chkpt_only(chkpt_only), retire(false)
     {}
 
     virtual ~partition_recycler_t() {}
@@ -50,7 +52,7 @@ public:
             unique_lock<mutex> lck(_recycler_mutex);
             _recycler_condvar.wait(lck);
             if (retire) { break; }
-            storage->delete_old_partitions();
+            storage->delete_old_partitions(chkpt_only);
         }
     }
 
@@ -61,6 +63,8 @@ public:
     }
 
     log_storage* storage;
+    bool chkpt_only;
+
     std::atomic<bool> retire;
     std::condition_variable _recycler_condvar;
     std::mutex _recycler_mutex;
@@ -76,7 +80,7 @@ log_storage::log_storage(const sm_options& options)
     :
         _skip_log(new skip_log)
 {
-    std::string logdir = options.get_string_option("sm_logdir", "");
+    std::string logdir = options.get_string_option("sm_logdir", "log");
     if (logdir.empty()) {
         cerr << "ERROR: sm_logdir must be set to enable logging." << endl;
         W_FATAL(eCRASH);
@@ -109,12 +113,13 @@ log_storage::log_storage(const sm_options& options)
     partition_number_t  last_partition = 1;
 
     fs::directory_iterator it(_logpath), eod;
-    boost::regex rx(log_regex, boost::regex::basic);
+    boost::regex log_rx(log_regex, boost::regex::basic);
+    boost::regex chkpt_rx(chkpt_regex, boost::regex::basic);
     for (; it != eod; it++) {
         fs::path fpath = it->path();
         string fname = fpath.filename().string();
 
-        if (boost::regex_match(fname, rx)) {
+        if (boost::regex_match(fname, log_rx)) {
             if (reformat) {
                 fs::remove(fpath);
                 continue;
@@ -126,6 +131,17 @@ log_storage::log_storage(const sm_options& options)
             if (pnum >= last_partition) {
                 last_partition = pnum;
             }
+        }
+        else if (boost::regex_match(fname, chkpt_rx)) {
+            if (reformat) {
+                fs::remove(fpath);
+                continue;
+            }
+
+            lsn_t lsn;
+            stringstream ss(fname.substr(chkpt_prefix.length()));
+            ss >> lsn;
+            _checkpoints.push_back(lsn);
         }
         else {
             cerr << "log_storage: cannot parse filename " << fname << endl;
@@ -151,6 +167,10 @@ log_storage::log_storage(const sm_options& options)
     }
 
     w_assert3(p->num() == last_partition);
+
+    if (_checkpoints.size() > 0) {
+        std::sort(_checkpoints.begin(), _checkpoints.end());
+    }
 }
 
 log_storage::~log_storage()
@@ -349,9 +369,9 @@ shared_ptr<partition_t> log_storage::create_partition(partition_number_t pnum)
 
     // take checkpoint & kick-off partition recycler (oportunistically)
     if (_max_partitions > 0) {
-        if (smlevel_0::chkpt) { smlevel_0::chkpt->wakeup_thread(); }
         if (smlevel_0::bf && smlevel_0::bf->get_cleaner()) {
             smlevel_0::bf->get_cleaner()->wakeup();
+            if (smlevel_0::chkpt) { smlevel_0::chkpt->wakeup_thread(); }
         }
     }
     wakeup_recycler();
@@ -365,39 +385,59 @@ shared_ptr<partition_t> log_storage::create_partition(partition_number_t pnum)
     return p;
 }
 
-void log_storage::wakeup_recycler()
+void log_storage::wakeup_recycler(bool chkpt_only)
 {
-    if (!_delete_old_partitions) { return; }
+    if (!_delete_old_partitions && !chkpt_only) { return; }
 
     if (!_recycler_thread) {
-        _recycler_thread.reset(new partition_recycler_t(this));
+        _recycler_thread.reset(new partition_recycler_t(this, chkpt_only));
         _recycler_thread->fork();
     }
     _recycler_thread->wakeup();
 }
 
-unsigned log_storage::delete_old_partitions(partition_number_t older_than)
+void log_storage::add_checkpoint(lsn_t lsn)
 {
-    if (!_delete_old_partitions) { return 0; }
+    spinlock_write_critical_section cs(&_partition_map_latch);
+    _checkpoints.push_back(lsn);
+}
+
+unsigned log_storage::delete_old_partitions(bool chkpt_only, partition_number_t older_than)
+{
+    if (!_delete_old_partitions && !chkpt_only) { return 0; }
 
     if (older_than == 0 && smlevel_0::chkpt) {
         lsn_t min_lsn = smlevel_0::chkpt->get_min_active_lsn();
-        older_than = min_lsn.hi();
+        older_than = min_lsn.is_null() ? smlevel_0::log->durable_lsn().hi() : min_lsn.hi();
+        if (smlevel_0::logArchiver) {
+            lsn_t lastArchivedLSN = smlevel_0::logArchiver->getDirectory()->getLastLSN();
+            if (older_than > lastArchivedLSN.hi()) {
+                older_than = lastArchivedLSN.hi();
+            }
+        }
     }
     // CS TODO: talk to log archiver!
 
     list<shared_ptr<partition_t>> to_be_deleted;
+    vector<lsn_t> old_chkpts;
 
     {
         spinlock_write_critical_section cs(&_partition_map_latch);
 
         partition_map_t::iterator it = _partitions.begin();
-        while (it != _partitions.end()) {
+        while (it != _partitions.end() && !chkpt_only) {
             if (it->first < older_than) {
                 to_be_deleted.push_front(it->second);
                 it = _partitions.erase(it);
             }
             else { it++; }
+        }
+
+        if (_checkpoints.size() > 1) {
+            old_chkpts = _checkpoints;
+            _checkpoints.clear();
+            _checkpoints.push_back(old_chkpts.back());
+            old_chkpts.pop_back();
         }
     }
 
@@ -412,6 +452,11 @@ unsigned log_storage::delete_old_partitions(partition_number_t older_than)
         // increment reference counters because objects were removed from map,
         // and the critical section above guarantees visibility.
         p->destroy();
+    }
+
+    // Delete old checkpoint files
+    for (auto c : old_chkpts) {
+        fs::remove(make_chkpt_path(c));
     }
 
     return to_be_deleted.size();
@@ -431,6 +476,11 @@ string log_storage::make_log_name(partition_number_t pnum) const
 fs::path log_storage::make_log_path(partition_number_t pnum) const
 {
     return _logpath / fs::path(log_prefix + to_string(pnum));
+}
+
+fs::path log_storage::make_chkpt_path(lsn_t lsn) const
+{
+    return _logpath / fs::path(chkpt_prefix + lsn.str());
 }
 
 void log_storage::try_delete(partition_number_t pnum)
