@@ -63,7 +63,6 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 
 #include "sm_options.h"
 #include "sm_base.h"
-#include "logdef_gen.cpp"
 #include "logtype_gen.h"
 #include "logdef_gen.cpp"
 #include "logrec.h"

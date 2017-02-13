@@ -377,6 +377,7 @@ w_rc_t bf_tree_m::fix(generic_page* parent, generic_page*& page,
             w_assert1(_is_active_idx(idx));
             cb.pin();
             cb.inc_ref_count();
+ 	    /*
 		// xum
 		if (cb._ref_count-1 < threshold && cb._ref_count >= threshold) {
 			// New hot page
@@ -385,7 +386,7 @@ w_rc_t bf_tree_m::fix(generic_page* parent, generic_page*& page,
 				hp_file.flush();
 			}
 		}
-
+	    */
             if (mode == LATCH_EX) {
                 cb.inc_ref_count_ex();
             }
