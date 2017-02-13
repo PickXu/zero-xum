@@ -1163,7 +1163,7 @@ lsn_t log_core::flush_daemon_work(lsn_t old_mark)
     long written = (end2 - start2) + (end1 - start1);
     //cout << "Flushed " << written << " bytes" << endl;
     p->set_size(start_lsn.lo()+written);
-    ::usleep(1000);
+    //::usleep(1000);
 
 #ifdef LOG_REPLICATION
     //xum: replicate the flushed log records to subscribers
