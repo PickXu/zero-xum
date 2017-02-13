@@ -21,9 +21,11 @@ Zero is developed in C++ and uses the CMake building system. Its only dependency
 On an Ubuntu system, the dependencies can usually be installed with the following commands:
 
 ```
+sudo apt-get update
 sudo apt-get install git cmake build-essential
-sudo apt-get install libboost-dev libboost-filesystem-dev libboost-regex-dev libboost-thread-dev libboost-program-options-dev libboost-random-dev
-sudo apt-get install libnuma-dev libzmq-dev libprotobuf-dev protobuf-compiler
+sudo apt-get install libboost-dev libboost-thread-dev libboost-program-options-dev
+sudo apt-get install libboost-random-dev libprotobuf-dev libzmq-dev libnuma-dev
+sudo apt-get install libboost-all-dev
 ```
 
 Zero requires libboost version 1.48. Please make sure that this version or a higher one is installed.
