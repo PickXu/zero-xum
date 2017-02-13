@@ -46,9 +46,7 @@ public:
     /// max # \ref stnode_t's on a single stnode_page; thus, the
     /// maximum number of stores per volume
     static const size_t max =
-        (page_sz - sizeof(generic_page_header)
-            - sizeof(lsn_t)
-            - sizeof(extent_id_t))
+        (page_sz - sizeof(generic_page_header) - sizeof(extent_id_t))
         / sizeof(stnode_t);
 
     // Page ID used by the stnode page
@@ -68,22 +66,16 @@ public:
 
     extent_id_t get_last_extent() { return last_extent; }
 
-    lsn_t getBackupLSN() { return backupLSN; }
-
     void format_empty() {
         memset(this, 0, sizeof(generic_page_header));
         pid = stnode_page::stpid;
 
-        backupLSN = lsn_t(0,0);
         last_extent = 0;
         memset(&stnode, 0, sizeof(stnode_t) * max);
     }
 
 
 private:
-    // Used for backup files
-    lsn_t backupLSN;
-
     // ID of the lastly allocated extent
     extent_id_t last_extent;
 
@@ -135,7 +127,7 @@ public:
     void dump(ostream& out);
 
     extent_id_t get_last_extent() {
-        return _stnode_page->get_last_extent();
+        return _stnode_page.get_last_extent();
     }
 
     lsn_t get_page_lsn();
@@ -150,7 +142,7 @@ private:
     // but simply as an in-memory data structure. As in alloc_cache_t,
     // decoupled propagation and checkpoints will take care of maintaining
     // the page on disk.
-    stnode_page* _stnode_page;
+    stnode_page _stnode_page;
 
     /// Required to maintain per-page log chain (see comments on alloc_cache.h)
     lsn_t prev_page_lsn;

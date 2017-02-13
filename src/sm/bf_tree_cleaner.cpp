@@ -17,17 +17,20 @@
 #include "xct.h"
 #include <vector>
 
-class candidate_collector_thread : public smthread_t
+class candidate_collector_thread : public worker_thread_t
 {
 public:
     candidate_collector_thread(bf_tree_cleaner* cleaner)
-        : cleaner(cleaner) {};
+        : worker_thread_t(-1), cleaner(cleaner)
+    {};
+
     virtual ~candidate_collector_thread() {};
 
-    virtual void run()
+    virtual void do_work()
     {
         cleaner->collect_candidates();
     }
+
 private:
     bf_tree_cleaner* cleaner;
 };
@@ -41,26 +44,43 @@ bf_tree_cleaner::bf_tree_cleaner(bf_tree_m* bufferpool, const sm_options& option
     min_write_size = options.get_int_option("sm_cleaner_min_write_size", 1);
     min_write_ignore_freq = options.get_int_option("sm_cleaner_min_write_ignore_freq", 0);
     ignore_metadata = options.get_bool_option("sm_cleaner_ignore_metadata", false);
+    async_candidate_collection =
+        options.get_bool_option("sm_cleaner_async_candidate_collection", false);
 
     string pstr = options.get_string_option("sm_cleaner_policy", "");
     policy = make_cleaner_policy(pstr);
 
     if (num_candidates > 0) {
-        next_candidates->reserve(num_candidates);
         curr_candidates->reserve(num_candidates);
+        next_candidates->reserve(num_candidates);
+    }
+
+    if (async_candidate_collection) {
+        collector.reset(new candidate_collector_thread(this));
+        collector->fork();
     }
 }
 
 bf_tree_cleaner::~bf_tree_cleaner()
 {
+    if (collector) { collector->stop(); }
 }
 
 void bf_tree_cleaner::do_work()
 {
+    // Only used in async mode
+    unsigned long round = 0;
+
     // fill up list of next candidates
     next_candidates->clear();
-    candidate_collector_thread t(this);
-    t.fork();
+    if (collector) {
+        round = collector->get_rounds_completed();
+        collector->wakeup();
+    }
+    else {
+        collect_candidates();
+        curr_candidates.swap(next_candidates);
+    }
 
     // if there's something in the current list, clean it
     if (curr_candidates->size() > 0) {
@@ -73,10 +93,12 @@ void bf_tree_cleaner::do_work()
         W_COERCE(smlevel_0::vol->get_stnode_cache()->write_page(dur_lsn));
     }
 
-    // wait for collector and swap next list into current
-    t.join();
-    w_assert1(curr_candidates->empty());
-    curr_candidates.swap(next_candidates);
+    // synchronize with asynchronous collector
+    if (collector) {
+        collector->wait_for_round(round + 1);
+        w_assert1(curr_candidates->empty());
+        curr_candidates.swap(next_candidates);
+    }
 }
 
 void bf_tree_cleaner::clean_candidates()
@@ -123,6 +145,11 @@ void bf_tree_cleaner::clean_candidates()
             }
         }
 
+        if (cluster_size == 0) {
+            i++;
+            continue;
+        }
+
         ADD_TSTAT(cleaner_time_copy, timer.time_us());
 
         log_and_flush(cluster_size);
@@ -155,7 +182,7 @@ bool bf_tree_cleaner::latch_and_copy(PageID pid, bf_idx idx, size_t wpos)
     // CS TODO: policy option: wait for latch or just attempt conditionally
     rc_t latch_rc = cb.latch().latch_acquire(LATCH_SH, WAIT_IMMEDIATE);
     if (latch_rc.is_error()) {
-        // Could not latch page in EX mode -- just skip it
+        // Could not latch page in SH mode -- just skip it
         return false;
     }
 
@@ -185,7 +212,7 @@ bool bf_tree_cleaner::latch_and_copy(PageID pid, bf_idx idx, size_t wpos)
     generic_page& pdest = _workspace[wpos];
     ::memcpy(&pdest, page_buffer + idx, sizeof (generic_page));
     pdest.lsn = cb.get_page_lsn();
-    // CS TODO: swizzling!
+
     // if the page contains a swizzled pointer, we need to convert
     // the data back to the original pointer.  we need to do this
     // before releasing SH latch because the pointer might be

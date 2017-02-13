@@ -74,7 +74,7 @@ Rome Research Laboratory Contract No. F30602-97-2-0247.
 #include <unistd.h>
 #include <sstream>
 
-restart_m::restart_m(const sm_options& options)
+restart_m::restart_m(const sm_options&)
     : _restart_thread(NULL)
 {
 }
@@ -126,7 +126,7 @@ void restart_m::log_analysis()
 
     //Re-add backups
     // CS TODO only works for one backup
-    smlevel_0::vol->sx_add_backup(chkpt.bkp_path, true);
+    // smlevel_0::vol->sx_add_backup(chkpt.bkp_path, true);
 
     ADD_TSTAT(restart_log_analysis_time, timer.time_us());
     sysevent::log(logrec_t::t_loganalysis_end);
@@ -134,7 +134,7 @@ void restart_m::log_analysis()
     ERROUT(<< "Log analysis found "
             << chkpt.buf_tab.size() << " dirty pages and "
             << chkpt.xct_tab.size() << " active transactions");
-    chkpt.dump(cerr);
+    // chkpt.dump(cerr);
 }
 
 /*********************************************************************
@@ -384,7 +384,7 @@ void restart_m::redo_page_pass()
 
         // simply fixing the page will take care of single-page recovery
         W_COERCE(smlevel_0::bf->fix_nonroot(
-                    page, NULL, pid, LATCH_SH, false, false, lastLSN));
+                    page, NULL, pid, LATCH_SH, false, false, false, lastLSN));
         smlevel_0::bf->unfix(page);
 
         iter++;
@@ -445,6 +445,7 @@ void restart_m::undo_pass()
                     // (if it is a loser transaction)
                     // Eat the error and skip this transaction, if thi sis a loser transaction
                     // rely on concurrent transaction to rollback this loser transaction
+                    DBGOUT3(<< "Skipped " << xd->tid() << " due to latch failure");
                     xd = iter.next();
                     continue;
             }
@@ -452,6 +453,7 @@ void restart_m::undo_pass()
         // CS TODO: which exception are we expecting to cacth here???
         catch (...)
         {
+            w_assert0(false);
             // It is possible a race condition occurred, the transaction object is being
             // destroyed, go to the next transaction
             xd = iter.next();
@@ -491,6 +493,8 @@ void restart_m::undo_pass()
                     // We do not have multiple log system transaction currently
                     // Nothing to do if single log system transaction
                     w_assert1(true == curr->is_single_log_sys_xct());
+                    // CS TODO: What's with these "just in case" solutions?
+                    w_assert0(false);
 
                     // We should not get here but j.i.c.
                     // Set undo_nxt to NULL so it cannot be rollback
@@ -500,7 +504,7 @@ void restart_m::undo_pass()
                 {
                     // Normal transaction
 
-                    DBGOUT3( << "Transaction " << curr->tid()
+                    DBGOUT3( << "Rolling back txn " << curr->tid()
                              << " with undo_nxt lsn " << curr->undo_nxt());
 
                     // Abort the transaction, this is using the standard transaction abort logic,
@@ -527,6 +531,8 @@ void restart_m::undo_pass()
             {
                 // Loser transaction but no undo_nxt, must be a compensation
                 // operation, nothing to undo
+                // CS TODO: can this ever happen? Can we just ignore it like that?
+                w_assert0(false);
             }
         }
         else
@@ -534,6 +540,7 @@ void restart_m::undo_pass()
             if (xd->latch().held_by_me())
                 xd->latch().latch_release();
 
+            DBGOUT3(<< "Skipped " << xd->tid() << " -- not loser txn or already rolling back");
             // All other transaction, ignore and advance to the next txn
             xd = iter.next();
         }

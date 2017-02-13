@@ -29,6 +29,7 @@
 #include "lock_raw.h"
 #include "log_lsn_tracker.h"
 #include "log_core.h"
+#include "eventlog.h"
 
 #include "allocator.h"
 
@@ -340,6 +341,7 @@ xct_t::xct_t(sm_stats_info_t* stats, timeout_in_ms timeout, bool sys_xct,
     }
 
     w_assert3(state() == xct_active);
+    _begin_tstamp = std::chrono::high_resolution_clock::now();
 }
 
 
@@ -1134,6 +1136,10 @@ xct_t::_commit(uint32_t flags, lsn_t* plastlsn /* default NULL*/)
     // in case the next transaction are read-only.
     lsn_t inherited_read_watermark;
 
+    // Static thread-local variables used to measure transaction latency
+    static thread_local unsigned long _accum_latency = 0;
+    static thread_local unsigned int _latency_count = 0;
+
     W_DO(_pre_commit(flags));
 
     if (_last_lsn.valid() || !smlevel_0::log)  {
@@ -1202,6 +1208,17 @@ xct_t::_commit(uint32_t flags, lsn_t* plastlsn /* default NULL*/)
         change_state(xct_active);
     } else {
         _xct_chain_len = 0;
+    }
+
+    auto end_tstamp = std::chrono::high_resolution_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end_tstamp - _begin_tstamp);
+    _accum_latency += elapsed.count();
+    _latency_count++;
+    // dump average latency every 100 commits
+    if (_latency_count % 100 == 0) {
+        sysevent::log_xct_latency_dump(_accum_latency / _latency_count);
+        _accum_latency = 0;
+        _latency_count = 0;
     }
 
     return RCOK;
@@ -1589,7 +1606,7 @@ xct_t::_sync_logbuf(bool block, bool signal)
 }
 
 rc_t
-xct_t::get_logbuf(logrec_t*& ret, int t)
+xct_t::get_logbuf(logrec_t*& ret, int)
 {
     // then , use tentative log buffer.
     // CS: system transactions should also go through log reservation,
@@ -1615,26 +1632,24 @@ void xct_t::_update_page_lsns(const fixable_page_h *page, const lsn_t &new_lsn) 
         // CS TODO: BUG! latch must always be EX for per-page log chain consistency
         if (page->latch_mode() == LATCH_EX) {
             const_cast<fixable_page_h*>(page)->update_page_lsn(new_lsn);
-            // CS: already setting dirty below
-            //const_cast<fixable_page_h*>(page)->set_dirty();
         } else {
             // CS TODO: this does not work! Fix eviction and get rid of this!
             w_assert0(false);
             // In some log type (so far only log_page_evict), we might update LSN only with
             // SH latch. In that case, we might have a race to update the LSN.
             // We should leave a larger value of LSN in that case.
-            DBGOUT3(<<"Update LSN without EX latch. Atomic CAS to deal with races");
-            const lsndata_t new_lsn_data = new_lsn.data();
-            lsndata_t *addr = reinterpret_cast<lsndata_t*>(&page->get_generic_page()->lsn);
-            lsndata_t cas_tmp = *addr;
-            while (!lintel::unsafe::atomic_compare_exchange_strong<lsndata_t>(
-                addr, &cas_tmp, new_lsn_data)) {
-                if (lsn_t(cas_tmp) > new_lsn) {
-                    DBGOUT1(<<"Someone else has already set a larger LSN. ");
-                    break;
-                }
-            }
-            w_assert1(page->get_page_lsn() >= new_lsn);
+            // DBGOUT3(<<"Update LSN without EX latch. Atomic CAS to deal with races");
+            // const lsndata_t new_lsn_data = new_lsn.data();
+            // lsndata_t *addr = reinterpret_cast<lsndata_t*>(&page->get_generic_page()->lsn);
+            // lsndata_t cas_tmp = *addr;
+            // while (!lintel::unsafe::atomic_compare_exchange_strong<lsndata_t>(
+            //     addr, &cas_tmp, new_lsn_data)) {
+            //     if (lsn_t(cas_tmp) > new_lsn) {
+            //         DBGOUT1(<<"Someone else has already set a larger LSN. ");
+            //         break;
+            //     }
+            // }
+            // w_assert1(page->get_page_lsn() >= new_lsn);
         }
     }
 }
@@ -2017,9 +2032,6 @@ xct_t::rollback(const lsn_t &save_pt)
              */
 
             fixable_page_h page;
-
-            // CS TODO: ALL undo should be logical
-            w_assert0 (r.is_logical());
 
             r.undo(page.is_fixed() ? &page : 0);
 
