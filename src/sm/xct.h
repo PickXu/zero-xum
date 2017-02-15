@@ -258,10 +258,11 @@ public:
         void operator delete(void* p, size_t s);
     };
 
-protected:
-    xct_core* _core;
+    //protected:
+    //xct_core* _core;
 
 public:
+    xct_core* _core;
     static const std::string IMPL_NAME;
 
 protected:
