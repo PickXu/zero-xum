@@ -13,14 +13,6 @@
 #include "log_spr.h"
 #include "logrec.h"
 
-#include "stopwatch.h"
-#include <ostream>
-#include "xct.h"
-  
-#include <mutex>
-std::mutex mtx;
-
-ofstream khong_single_page_log_file;
 
 page_evict_log::page_evict_log (const btree_page_h& p,
                                 general_recordid_t child_slot, lsn_t child_lsn) {
@@ -80,8 +72,6 @@ rc_t restart_m::recover_single_page(fixable_page_h &p, const lsn_t& emlsn)
     DBGOUT1(<< "Starting SPR page " << pid << ", EMLSN=" << emlsn << ", log-tail= "
             << smlevel_0::log->curr_lsn());
 
-    stopwatch_t timer;
-    timer.reset();
 
     // CS TODO: because of cleaner bug, we fetch page from disk itself.  In
     // other words, if we are performing write elision, then we must read from
@@ -100,26 +90,6 @@ rc_t restart_m::recover_single_page(fixable_page_h &p, const lsn_t& emlsn)
 
     W_DO(_apply_spr_logs(p, buffer, lr_offsets));
     delete[] buffer;
-
-    long long curr = timer.time_us();     
-
-    if (!khong_single_page_log_file.is_open()) 
-      khong_single_page_log_file.open("single_page_recovery_info.txt",std::ofstream::out | std::ofstream::binary);
-     
-    mtx.lock();
-    xct_t* curr_xct = xct();
-    if (curr_xct != NULL && curr_xct->_core != NULL) {
-      khong_single_page_log_file<<curr_xct->_core->_tid<<","<<curr_xct->_core->_state<<","
-				<<pid<<","<<p.store()<<","<<p.lsn()<<","<<p.tag()<<","
-				<<p.has_children()<<","<<curr<<"\n";
-    }
-    else {
-      khong_single_page_log_file<<"NoTID"<<","<<pid<<","
-				<<p.store()<<","<<p.lsn()<<","<<p.tag()<<","
-                                <<p.has_children()<<","<<curr<<"\n";
-    }
-    khong_single_page_log_file.flush();
-    mtx.unlock();
 
     w_assert0(p.lsn() == emlsn);
     DBGOUT1(<< "Single-Page-Recovery done for page " << p.pid());
